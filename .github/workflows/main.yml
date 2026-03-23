@@ -1,4 +1,4 @@
-name: Windows TigerVNC Fixed
+name: Windows TigerVNC Auto-Path Fix
 
 on:
   push:
@@ -9,32 +9,46 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install TigerVNC and Node.js
+      - name: Install VNC and Python Tools
         shell: powershell
         run: |
-          # 1. Install TigerVNC (The Headless King)
-          choco install tigervnc nodejs -y
+          # 1. Install TigerVNC and Python
+          choco install tigervnc python -y
+          refreshenv
+          python -m pip install websockify
           
-          # 2. Start TigerVNC as a user process (No Service = No Loopback Error)
-          # Use -SecurityTypes None for the bridge (Websockify handles the pass)
-          $vncPath = "C:\Program Files\TigerVNC\vncserver.exe"
-          Start-Process $vncPath -ArgumentList "-SecurityTypes None -localhost 1" -WindowStyle Hidden
+      - name: Locate and Start VNC
+        shell: powershell
+        run: |
+          # 2. Find the VNC executable (it moves depending on version)
+          $vncExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Include "vncserver.exe", "winvnc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          
+          if ($null -eq $vncExe) {
+              Write-Error "Could not find VNC executable in Program Files."
+              exit 1
+          }
+          
+          Write-Host "Found VNC at: $vncExe"
+          
+          # 3. Start TigerVNC as a user process
+          # SecurityTypes=None bypasses the 'Invalid Password' wall
+          Start-Process $vncExe -ArgumentList "-SecurityTypes None -localhost 1" -WindowStyle Hidden
           Start-Sleep -Seconds 10
 
       - name: Setup WebSocket Proxy
         shell: powershell
         run: |
-          npm install -g websockify
-          # Start bridge: Web(8080) -> TigerVNC(5901)
-          Start-Process websockify -ArgumentList "8080 localhost:5901" -WindowStyle Hidden
+          # 4. Start bridge: Web(8080) -> VNC(5901 or 5900)
+          # TigerVNC usually starts at 5901 for the first display
+          Start-Process python -ArgumentList "-m websockify 8080 localhost:5901" -WindowStyle Hidden
+          Start-Sleep -Seconds 5
           
-          # Verification: Ensure port 8080 is open
-          $retry = 0
-          while ($retry -lt 10) {
-              $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 8080
-              if ($check.TcpTestSucceeded) { Write-Host "Bridge is UP"; break }
-              $retry++
-              Start-Sleep -Seconds 3
+          # Health Check: Try 5900 if 5901 isn't responding
+          $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 5901
+          if (!$check.TcpTestSucceeded) {
+              Write-Host "Port 5901 closed, trying 5900..."
+              Stop-Process -Name "python" -ErrorAction SilentlyContinue
+              Start-Process python -ArgumentList "-m websockify 8080 localhost:5900" -WindowStyle Hidden
           }
 
       - name: Setup TryCloudflare Tunnel
