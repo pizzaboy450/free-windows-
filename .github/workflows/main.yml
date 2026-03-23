@@ -1,4 +1,4 @@
-name: Windows noVNC Final Fix
+name: Windows FullScreen noVNC
 
 on:
   push:
@@ -9,48 +9,52 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install VNC and Python
+      - name: Configure High-Res Display & Audio
+        shell: powershell
+        run: |
+          # Force the screen resolution to 1080p for full-screen experience
+          Set-DisplayResolution -Width 1920 -Height 1080 -Forcey
+          
+          # Start Audio Service
+          Start-Service -Name Audiosrv -ErrorAction SilentlyContinue
+          Set-Service -Name Audiosrv -StartupType Automatic
+
+      - name: Install VNC with Loopback Fix
         shell: powershell
         run: |
           # 1. Install TightVNC
           choco install tightvnc -y
+          
+          # 2. CRITICAL: Enable Loopback (Fixes 'Loopback connections not enabled' error)
+          $regPath = "HKLM:\Software\TightVNC\Server"
+          if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
+          Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
+          Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 0 -Type DWord
+          
+          # 3. Set Password to 'password' and Start
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
-          
-          # 2. Install Python and Websockify
+
+      - name: Setup Python & noVNC
+        shell: powershell
+        run: |
+          # 1. Install Python & Websockify
           choco install python -y
           refreshenv
           python -m pip install websockify
           
-          # 3. Download noVNC Files
+          # 2. Download noVNC
           mkdir C:\noVNC
           Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
           Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
-
-      - name: Start Bridge Service
-        shell: powershell
-        run: |
-          # Get the folder name (it usually has a version suffix)
-          $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
           
-          # Rename the main file so it loads automatically
+          # 3. Prepare index.html for instant loading
+          $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
           Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
           
-          Write-Host "Starting Websockify Bridge..."
-          # Start python websockify: Port 8080 -> 5900
+          # 4. Start Bridge: Port 8080 (Web) -> 5900 (VNC)
           Start-Process python -ArgumentList "-m websockify 8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
-          
-          # Give it 20 seconds to fully bind to the port
           Start-Sleep -Seconds 20
-          
-          # Verification
-          $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 8080
-          if ($check.TcpTestSucceeded) {
-              Write-Host "SUCCESS: Bridge is active."
-          } else {
-              Write-Error "CRITICAL: Bridge failed to bind to port 8080."
-              exit 1
-          }
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
@@ -58,28 +62,30 @@ jobs:
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
           Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          Write-Host "Starting TryCloudflare tunnel..."
+          Write-Host "Starting Tunnel..."
           $logFile = "cloudflared_err.log"
           Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
           $maxRetries = 20
           $url = ""
-          while ($url -eq "" -and $retryCount -lt $maxRetries) {
+          $retry = 0
+          while ($url -eq "" -and $retry -lt $maxRetries) {
               Start-Sleep -Seconds 5
               if (Test-Path $logFile) {
                   $content = Get-Content $logFile
                   $line = $content | Select-String -Pattern "https://.*\.trycloudflare\.com"
                   if ($line) { $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value }
               }
-              $retryCount++
+              $retry++
           }
 
           if ($url -ne "") {
               Write-Host "=========================================="
-              Write-Host "ACCESS YOUR WINDOWS VNC AT:"
-              Write-Host "$url"
-              Write-Host "VNC PASSWORD: password"
+              Write-Host "FULL-SCREEN VNC URL:"
+              Write-Host "$url/index.html?autoconnect=true&password=password"
               Write-Host "=========================================="
+          } else {
+              exit 1
           }
           
           while($true) { Start-Sleep -Seconds 60 }
