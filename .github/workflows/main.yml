@@ -1,4 +1,4 @@
-name: Windows noVNC Pure Bridge
+name: Windows noVNC Fixed Loopback
 
 on:
   push:
@@ -9,42 +9,47 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install VNC with Loopback Fix
+      - name: Install VNC with Registry Force-Fix
         shell: powershell
         run: |
           # 1. Install TightVNC
           choco install tightvnc -y
           
-          # 2. Fix 'Loopback connections not enabled' by allowing 127.0.0.1
+          # 2. FORCE Loopback & Password in Registry before starting
+          # This stops the 'Loopback connections not enabled' error permanently
           $regPath = "HKLM:\Software\TightVNC\Server"
           if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
+          
+          # Allow 127.0.0.1 connections
           Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
           Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 0 -Type DWord
+          Set-ItemProperty -Path $regPath -Name "AcceptHttpConnections" -Value 1 -Type DWord
           
-          # 3. Set Password and Start
+          # 3. Set Password and Start Service
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
 
-      - name: Setup Python & noVNC
+      - name: Setup Python & noVNC Bridge
         shell: powershell
         run: |
-          # 1. Install Python & Bridge Tool
+          # 1. Install Python & Websockify
           choco install python -y
           refreshenv
           python -m pip install websockify
           
-          # 2. Download noVNC Web Files
+          # 2. Download noVNC
           mkdir C:\noVNC
           Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
           Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
           
-          # 3. Map vnc.html to index.html for root access
+          # 3. Prepare Web Interface
           $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
           Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
           
           # 4. Start Bridge: Web(8080) -> VNC(5900)
-          Start-Process python -ArgumentList "-m websockify 8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
-          Start-Sleep -Seconds 15
+          # We use 127.0.0.1 explicitly to match the AllowLoopback rule
+          Start-Process python -ArgumentList "-m websockify 8080 127.0.0.1:5900 --web $vncPath" -WindowStyle Hidden
+          Start-Sleep -Seconds 20
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
@@ -58,7 +63,7 @@ jobs:
           $logFile = "cloudflared_err.log"
           Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
-          # Extract URL
+          # Wait and extract URL
           $maxRetries = 20
           $url = ""
           $retry = 0
@@ -78,9 +83,7 @@ jobs:
               Write-Host "$url/index.html?autoconnect=true&password=password"
               Write-Host "=========================================="
           } else {
-              Write-Error "Cloudflare failed to generate a link."
               exit 1
           }
           
-          # 6-Hour Keep-Alive
           while($true) { Start-Sleep -Seconds 60 }
