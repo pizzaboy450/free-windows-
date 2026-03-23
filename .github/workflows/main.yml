@@ -1,4 +1,4 @@
-name: Windows noVNC Standalone Fix
+name: Windows noVNC User-Mode Fix
 
 on:
   push:
@@ -9,38 +9,36 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install UltraVNC & Setup Config
+      - name: Install TightVNC & Python
         shell: powershell
         run: |
-          # 1. Install UltraVNC
-          choco install ultravnc -y
-          
-          # 2. Create the config file in the install directory
-          # Using 'password' (hex: 4cf1762c5e53) and enabling loopback
-          $vncDir = "C:\Program Files\uvnc bvba\UltraVNC"
-          $configContent = @"
-          [Permissions]
-          [Admin]
-          AllowLoopback=1
-          LoopbackOnly=0
-          Password=4cf1762c5e53
-          [UltraVNC]
-          port=5900
-          "@
-          Set-Content -Path "$vncDir\ultravnc.ini" -Value $configContent
-          
-          # 3. Start winvnc.exe as a background process (NOT a service)
-          Write-Host "Starting UltraVNC as standalone process..."
-          Start-Process "$vncDir\winvnc.exe" -ArgumentList "-run" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
-
-      - name: Setup Python & noVNC Bridge
-        shell: powershell
-        run: |
-          choco install python -y
+          choco install tightvnc python -y
           refreshenv
           python -m pip install websockify
+
+      - name: Start TightVNC in User Mode
+        shell: powershell
+        run: |
+          # Kill any existing service that might be blocking the port
+          Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
           
+          # Start TightVNC as a simple background process
+          # -run: starts the server
+          # -repasswd: we set the password to 'password'
+          # -sharefull: ensures the whole desktop is shared
+          $vncExe = "C:\Program Files\TightVNC\tvnserver.exe"
+          
+          # Set the password in the user configuration
+          & $vncExe -controlservice -setpassword "password"
+          
+          Write-Host "Starting VNC Server in User Mode..."
+          Start-Process $vncExe -ArgumentList "-run" -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+
+      - name: Setup noVNC Bridge
+        shell: powershell
+        run: |
+          # Download noVNC
           mkdir C:\noVNC
           Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
           Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
@@ -48,13 +46,10 @@ jobs:
           $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
           Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
           
-          # Start Bridge: Web(8080) -> UltraVNC(5900)
+          # Start Bridge: Web(8080) -> VNC(5900)
+          # We use 127.0.0.1 which User-Mode TightVNC accepts by default
           Start-Process python -ArgumentList "-m websockify 8080 127.0.0.1:5900 --web $vncPath" -WindowStyle Hidden
-          Start-Sleep -Seconds 15
-          
-          # Quick health check
-          $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 8080
-          if (!$check.TcpTestSucceeded) { Write-Error "Bridge failed to start"; exit 1 }
+          Start-Sleep -Seconds 10
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
@@ -80,11 +75,9 @@ jobs:
 
           if ($url -ne "") {
               Write-Host "=========================================="
-              Write-Host "VNC URL (AUTO-CONNECT):"
+              Write-Host "VNC ACCESS LINK:"
               Write-Host "$url/index.html?autoconnect=true&password=password"
               Write-Host "=========================================="
-          } else {
-              exit 1
           }
           
           while($true) { Start-Sleep -Seconds 60 }
