@@ -1,4 +1,4 @@
-name: Windows Web RDP Session
+name: Windows Web RDP with Audio
 
 on:
   push:
@@ -11,40 +11,61 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install IIS and Windows Features
+      - name: Enable Windows Audio & RDP Features
+        shell: powershell
+        run: |
+          # Start Windows Audio Services (Required for sound)
+          net start Audiosrv
+          Set-Service -Name Audiosrv -StartupType Automatic
+          
+          # Enable RDP and Force Audio Redirection in Registry
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "fDisableAudioCapture" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # Set Admin Password
+          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $Password
+
+      - name: Install IIS and Web Components
         shell: powershell
         run: |
           Install-WindowsFeature -name Web-Server, Web-Mgmt-Tools, Web-Default-Doc, Web-Dir-Browsing, Web-Http-Errors, Web-Static-Content, Web-Http-Logging, Web-Stat-Compression, Web-Filtering, Web-ISAPI-Filter, Web-ISAPI-Ext, Web-Net-Ext45, Web-Asp-Net45
 
-      - name: Enable RDP & Set Admin Password
-        shell: powershell
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
-          Set-LocalUser -Name "runneradmin" -Password $Password
-
-      - name: Install Myrtille (Native Windows Web RDP)
+      - name: Install Myrtille (Native Web RDP)
         shell: powershell
         run: |
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           $url = "https://github.com/cedrozne/myrtille/releases/download/v2.9.1/Myrtille_2.9.1_x64.msi"
+          
+          # Use curl for reliable download
           curl.exe -L $url -o Myrtille.msi
-          if (Test-Path Myrtille.msi) {
-            Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
-            Start-Sleep -Seconds 30
-          } else {
-            exit 1
+          
+          # Pre-create directory to prevent 404
+          if (!(Test-Path C:\inetpub\wwwroot\myrtille)) { New-Item -ItemType Directory -Path C:\inetpub\wwwroot\myrtille }
+          
+          # Quiet Install
+          Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
+          Start-Sleep -Seconds 30
+          
+          # Map Application to IIS manually to ensure it works
+          Import-Module WebAdministration
+          if (!(Get-WebApplication -Name "myrtille" -Site "Default Web Site")) {
+              New-WebApplication -Name "myrtille" -Site "Default Web Site" -PhysicalPath "C:\inetpub\wwwroot\myrtille" -ApplicationPool "DefaultAppPool"
           }
 
-      - name: Setup ngrok & Tunnel Web Port
+      - name: Setup ngrok & Tunnel
         shell: powershell
         run: |
           choco install ngrok -y
           ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
+          
+          Write-Host "Starting ngrok tunnel..."
           Start-Process ngrok -ArgumentList "http 80 --log=stdout"
           
-          $maxRetries = 12
+          # Loop to grab the URL from API
+          $maxRetries = 15
           $retryCount = 0
           $url = ""
           while ($url -eq "" -and $retryCount -lt $maxRetries) {
@@ -54,23 +75,24 @@ jobs:
                   $url = $ngrokApi.tunnels[0].public_url
               } catch {
                   $retryCount++
-                  Write-Host "Waiting for ngrok API... (Attempt $retryCount)"
+                  Write-Host "Waiting for ngrok... (Attempt $retryCount)"
               }
           }
 
           if ($url -ne "") {
               Write-Host "=========================================="
               Write-Host "ACCESS YOUR WINDOWS WEB RDP AT:"
-              Write-Host "$url/myrtille"
-              Write-Host "LOGIN: runneradmin / P@ssw0rd123!"
+              Write-Host "$url/myrtille/"
+              Write-Host "USER: runneradmin | PASS: P@ssw0rd123!"
               Write-Host "=========================================="
           }
           
+          # Keep-Alive
           $i = 0
           while($i -lt 360) {
             Start-Sleep -Seconds 60
             $i++
-            Write-Host "Session active... Minute: $i"
+            if ($i % 10 -eq 0) { Write-Host "Session active... Minute: $i" }
           }
         env:
           NGROK_AUTH_TOKEN: "37l1QIrQAcIgObkcpyBFAHvdjWr_3wVjmVQ9EQTRyj3V8pUxV"
