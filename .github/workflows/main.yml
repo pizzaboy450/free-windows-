@@ -1,4 +1,4 @@
-name: Windows noVNC Fixed
+name: Windows noVNC Final Fix
 
 on:
   push:
@@ -9,44 +9,46 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install VNC and noVNC
+      - name: Install VNC and Python
         shell: powershell
         run: |
           # 1. Install TightVNC
           choco install tightvnc -y
-          
-          # 2. Set VNC Password to 'password'
-          # Using the hex-encoded version of 'password' to force it into registry
-          $passHex = "70,61,73,73,77,6f,72,64,00,00,00,00"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
           
-          # 3. Download noVNC (Portable Version)
+          # 2. Install Python and Websockify
+          choco install python -y
+          refreshenv
+          python -m pip install websockify
+          
+          # 3. Download noVNC Files
           mkdir C:\noVNC
           Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
           Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
-          
-          # 4. Install Node.js and Websockify (The Proxy)
-          choco install nodejs -y
-          npm install -g websockify
 
-      - name: Start noVNC Service
+      - name: Start Bridge Service
         shell: powershell
         run: |
-          # Start Websockify: Port 8080 (Web) -> Port 5900 (VNC)
-          # We point the webroot to the extracted noVNC folder
+          # Get the folder name (it usually has a version suffix)
           $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
-          Start-Process "websockify" -ArgumentList "8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
           
-          # Wait for it to wake up
-          Start-Sleep -Seconds 10
+          # Rename the main file so it loads automatically
+          Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
           
-          # Test if the port is open locally (Prevention of 502)
-          $check = Test-NetConnection -ComputerName localhost -Port 8080
+          Write-Host "Starting Websockify Bridge..."
+          # Start python websockify: Port 8080 -> 5900
+          Start-Process python -ArgumentList "-m websockify 8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
+          
+          # Give it 20 seconds to fully bind to the port
+          Start-Sleep -Seconds 20
+          
+          # Verification
+          $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 8080
           if ($check.TcpTestSucceeded) {
-              Write-Host "Local noVNC server is UP on port 8080."
+              Write-Host "SUCCESS: Bridge is active."
           } else {
-              Write-Error "Local noVNC server failed to start."
+              Write-Error "CRITICAL: Bridge failed to bind to port 8080."
               exit 1
           }
 
@@ -58,10 +60,9 @@ jobs:
           
           Write-Host "Starting TryCloudflare tunnel..."
           $logFile = "cloudflared_err.log"
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:8080" -RedirectStandardError $logFile
+          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
           $maxRetries = 20
-          $retryCount = 0
           $url = ""
           while ($url -eq "" -and $retryCount -lt $maxRetries) {
               Start-Sleep -Seconds 5
@@ -71,13 +72,13 @@ jobs:
                   if ($line) { $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value }
               }
               $retryCount++
-              Write-Host "Waiting for Cloudflare URL... (Attempt $retryCount)"
           }
 
           if ($url -ne "") {
               Write-Host "=========================================="
               Write-Host "ACCESS YOUR WINDOWS VNC AT:"
-              Write-Host "$url/vnc.html?autoconnect=true&password=password"
+              Write-Host "$url"
+              Write-Host "VNC PASSWORD: password"
               Write-Host "=========================================="
           }
           
