@@ -1,86 +1,30 @@
-name: Windows Web RDP with Audio
-
-on:
-  push:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
-
-jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 360
-    steps:
-      - name: Enable Windows Audio & RDP Features
+- name: Setup TryCloudflare & Tunnel
         shell: powershell
         run: |
-          # Start Windows Audio - SilentlyContinue prevents the "already started" crash
-          Start-Service -Name Audiosrv -ErrorAction SilentlyContinue
-          Set-Service -Name Audiosrv -StartupType Automatic
+          # 1. Download Cloudflared
+          curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
+          Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          # Force Registry settings for RDP Audio Redirection
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "fDisableAudioCapture" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          # 2. Start Tunnel (Points to local port 80 where Myrtille lives)
+          Write-Host "Starting TryCloudflare tunnel..."
+          # We use --url http://localhost:80 because Myrtille is an IIS web app
+          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:80" -RedirectStandardOutput "cloudflared.log"
           
-          # Set Admin Password
-          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
-          Set-LocalUser -Name "runneradmin" -Password $Password
-
-      - name: Install IIS and Web Components
-        shell: powershell
-        run: |
-          Install-WindowsFeature -name Web-Server, Web-Mgmt-Tools, Web-Default-Doc, Web-Dir-Browsing, Web-Http-Errors, Web-Static-Content, Web-Http-Logging, Web-Stat-Compression, Web-Filtering, Web-ISAPI-Filter, Web-ISAPI-Ext, Web-Net-Ext45, Web-Asp-Net45
-
-      - name: Install Myrtille and Media Tools
-        shell: powershell
-        run: |
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          
-          # Install VLC to initialize audio drivers
-          choco install vlc -y
-          
-          # Download Myrtille
-          $url = "https://github.com/cedrozne/myrtille/releases/download/v2.9.1/Myrtille_2.9.1_x64.msi"
-          curl.exe -L $url -o Myrtille.msi
-          
-          # Ensure directory exists for IIS mapping
-          if (!(Test-Path C:\inetpub\wwwroot\myrtille)) { New-Item -ItemType Directory -Path C:\inetpub\wwwroot\myrtille }
-          
-          # Install Myrtille
-          Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
-          Start-Sleep -Seconds 30
-          
-          # Manually map the IIS Application to fix the 404 error
-          Import-Module WebAdministration
-          if (!(Get-WebApplication -Name "myrtille" -Site "Default Web Site")) {
-              New-WebApplication -Name "myrtille" -Site "Default Web Site" -PhysicalPath "C:\inetpub\wwwroot\myrtille" -ApplicationPool "DefaultAppPool"
-          }
-
-      - name: Setup ngrok & Tunnel
-        shell: powershell
-        run: |
-          # Install ngrok via Choco for stability
-          choco install ngrok -y
-          ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
-          
-          Write-Host "Starting ngrok tunnel..."
-          Start-Process ngrok -ArgumentList "http 80 --log=stdout"
-          
-          # Wait for the ngrok API to provide the URL
-          $maxRetries = 15
+          # 3. Extract the random URL from the logs
+          $maxRetries = 20
           $retryCount = 0
           $url = ""
           while ($url -eq "" -and $retryCount -lt $maxRetries) {
-              try {
-                  Start-Sleep -Seconds 5
-                  $ngrokApi = Invoke-WebRequest -Uri http://localhost:4040/api/tunnels -UseBasicParsing | ConvertFrom-Json
-                  $url = $ngrokApi.tunnels[0].public_url
-              } catch {
-                  $retryCount++
-                  Write-Host "Waiting for ngrok... (Attempt $retryCount)"
+              Start-Sleep -Seconds 5
+              if (Test-Path cloudflared.log) {
+                  $content = Get-Content cloudflared.log
+                  $line = $content | Select-String -Pattern "https://.*\.trycloudflare\.com"
+                  if ($line) {
+                      $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value
+                  }
               }
+              $retryCount++
+              Write-Host "Waiting for Cloudflare URL... (Attempt $retryCount)"
           }
 
           if ($url -ne "") {
@@ -91,12 +35,9 @@ jobs:
               Write-Host "=========================================="
           }
           
-          # 6-Hour Keep-Alive Loop
+          # Keep-Alive
           $i = 0
           while($i -lt 360) {
             Start-Sleep -Seconds 60
             $i++
-            if ($i % 10 -eq 0) { Write-Host "Session active... Minute: $i" }
           }
-        env:
-          NGROK_AUTH_TOKEN: "3BMSLAeag3NtqgcVomW5yxeLFSm_5KhWqGvnpUoumm5MWwu1L"
