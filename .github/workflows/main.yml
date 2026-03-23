@@ -1,4 +1,4 @@
-name: Windows FullScreen noVNC
+name: Windows noVNC Pure Bridge
 
 on:
   push:
@@ -9,63 +9,56 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Configure High-Res Display & Audio
-        shell: powershell
-        run: |
-          # Force the screen resolution to 1080p for full-screen experience
-          Set-DisplayResolution -Width 1920 -Height 1080 -Forcey
-          
-          # Start Audio Service
-          Start-Service -Name Audiosrv -ErrorAction SilentlyContinue
-          Set-Service -Name Audiosrv -StartupType Automatic
-
       - name: Install VNC with Loopback Fix
         shell: powershell
         run: |
           # 1. Install TightVNC
           choco install tightvnc -y
           
-          # 2. CRITICAL: Enable Loopback (Fixes 'Loopback connections not enabled' error)
+          # 2. Fix 'Loopback connections not enabled' by allowing 127.0.0.1
           $regPath = "HKLM:\Software\TightVNC\Server"
           if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
           Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
           Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 0 -Type DWord
           
-          # 3. Set Password to 'password' and Start
+          # 3. Set Password and Start
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
 
       - name: Setup Python & noVNC
         shell: powershell
         run: |
-          # 1. Install Python & Websockify
+          # 1. Install Python & Bridge Tool
           choco install python -y
           refreshenv
           python -m pip install websockify
           
-          # 2. Download noVNC
+          # 2. Download noVNC Web Files
           mkdir C:\noVNC
           Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
           Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
           
-          # 3. Prepare index.html for instant loading
+          # 3. Map vnc.html to index.html for root access
           $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
           Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
           
-          # 4. Start Bridge: Port 8080 (Web) -> 5900 (VNC)
+          # 4. Start Bridge: Web(8080) -> VNC(5900)
           Start-Process python -ArgumentList "-m websockify 8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
-          Start-Sleep -Seconds 20
+          Start-Sleep -Seconds 15
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
         run: |
+          # Install Cloudflared
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
           Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
+          # Start Tunnel
           Write-Host "Starting Tunnel..."
           $logFile = "cloudflared_err.log"
           Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
+          # Extract URL
           $maxRetries = 20
           $url = ""
           $retry = 0
@@ -81,11 +74,13 @@ jobs:
 
           if ($url -ne "") {
               Write-Host "=========================================="
-              Write-Host "FULL-SCREEN VNC URL:"
+              Write-Host "VNC URL (AUTO-CONNECT):"
               Write-Host "$url/index.html?autoconnect=true&password=password"
               Write-Host "=========================================="
           } else {
+              Write-Error "Cloudflare failed to generate a link."
               exit 1
           }
           
+          # 6-Hour Keep-Alive
           while($true) { Start-Sleep -Seconds 60 }
