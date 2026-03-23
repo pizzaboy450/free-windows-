@@ -1,4 +1,4 @@
-name: Direct RDP (No Browser Errors)
+name: Windows noVNC Universal Bridge
 
 on:
   push:
@@ -9,46 +9,53 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Enable Windows RDP & User
+      - name: Install VNC and Node.js
         shell: powershell
         run: |
-          # 1. Enable RDP and Firewall
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          choco install tightvnc nodejs -y
+          # Set VNC Password to 'password'
+          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           
-          # 2. Set Password for 'runneradmin'
-          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
-          Set-LocalUser -Name "runneradmin" -Password $Password
+          # Fix the Loopback issue directly in Registry
+          $regPath = "HKLM:\Software\TightVNC\Server"
+          if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
+          Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
           
-          # 3. Enable Audio Redirection
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "fDisableAudioCapture" -Value 0
+          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
 
-      - name: Start ngrok TCP Tunnel
+      - name: Setup WebSocket Proxy
         shell: powershell
         run: |
-          # Install and Authenticate ngrok
+          npm install -g websockify
+          # Start proxy: Port 8080 -> VNC Port 5900
+          Start-Process websockify -ArgumentList "8080 localhost:5900" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+
+      - name: Start ngrok Tunnel
+        shell: powershell
+        run: |
           choco install ngrok -y
-          # USE YOUR TOKEN:
           ngrok config add-authtoken "3BMSLAeag3NtqgcVomW5yxeLFSm_5KhWqGvnpUoumm5MWwu1L"
           
-          # Start a RAW TCP tunnel (No HTTP/URL logic involved)
-          Start-Process ngrok -ArgumentList "tcp 3389"
-          Start-Sleep -Seconds 10
+          # Start a TCP tunnel for the WebSocket bridge
+          Start-Process ngrok -ArgumentList "tcp 8080"
           
-          # Get the TCP Address from ngrok API
+          # Wait longer this time to avoid the 'Unable to connect' error
+          Start-Sleep -Seconds 20
+          
           $ngrokApi = Invoke-WebRequest -Uri http://localhost:4040/api/tunnels -UseBasicParsing | ConvertFrom-Json
           $address = $ngrokApi.tunnels[0].public_url -replace "tcp://", ""
+          $hostName = $address.Split(':')[0]
+          $port = $address.Split(':')[1]
           
           Write-Host "=========================================="
-          Write-Host "CONNECT USING WINDOWS REMOTE DESKTOP APP:"
-          Write-Host "COMPUTER ADDRESS: $address"
-          Write-Host "USERNAME: runneradmin"
-          Write-Host "PASSWORD: P@ssw0rd123!"
+          Write-Host "HOW TO CONNECT USING noVNC DEMO:"
+          Write-Host "1. Go to: https://novnc.com/noVNC/vnc.html"
+          Write-Host "2. Click 'Settings' (Gear Icon)"
+          Write-Host "3. Change 'Transport' to 'WebSockets' (NOT Encrypted/WSS)"
+          Write-Host "4. Host: $hostName"
+          Write-Host "5. Port: $port"
+          Write-Host "6. Click CONNECT and use password: password"
           Write-Host "=========================================="
           
-          # 6-Hour Keep-Alive
-          $i = 0
-          while($i -lt 360) {
-            Start-Sleep -Seconds 60
-            $i++
-          }
+          while($true) { Start-Sleep -Seconds 60 }
