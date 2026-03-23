@@ -1,4 +1,4 @@
-name: Windows noVNC Universal Bridge
+name: Windows noVNC via Cloudflare (No Ngrok)
 
 on:
   push:
@@ -13,49 +13,79 @@ jobs:
         shell: powershell
         run: |
           choco install tightvnc nodejs -y
-          # Set VNC Password to 'password'
-          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           
           # Fix the Loopback issue directly in Registry
           $regPath = "HKLM:\Software\TightVNC\Server"
           if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
           Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
           
+          # Set VNC Password to 'password'
+          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
 
       - name: Setup WebSocket Proxy
         shell: powershell
         run: |
           npm install -g websockify
-          # Start proxy: Port 8080 -> VNC Port 5900
+          # Start bridge: Web(8080) -> VNC(5900)
           Start-Process websockify -ArgumentList "8080 localhost:5900" -WindowStyle Hidden
-          Start-Sleep -Seconds 10
+          
+          # Verification: Wait for port 8080 to actually open
+          $retry = 0
+          while ($retry -lt 10) {
+              $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 8080
+              if ($check.TcpTestSucceeded) { 
+                  Write-Host "Bridge is UP on 8080"; break 
+              }
+              $retry++
+              Start-Sleep -Seconds 3
+          }
 
-      - name: Start ngrok Tunnel
+      - name: Setup TryCloudflare Tunnel
         shell: powershell
         run: |
-          choco install ngrok -y
-          ngrok config add-authtoken "3BMSLAeag3NtqgcVomW5yxeLFSm_5KhWqGvnpUoumm5MWwu1L"
+          # Install Cloudflared
+          curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
+          Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          # Start a TCP tunnel for the WebSocket bridge
-          Start-Process ngrok -ArgumentList "tcp 8080"
+          # Start Tunnel on port 8080 (the bridge port)
+          Write-Host "Starting Cloudflare Tunnel..."
+          $logFile = "cloudflared_err.log"
+          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
-          # Wait longer this time to avoid the 'Unable to connect' error
-          Start-Sleep -Seconds 20
-          
-          $ngrokApi = Invoke-WebRequest -Uri http://localhost:4040/api/tunnels -UseBasicParsing | ConvertFrom-Json
-          $address = $ngrokApi.tunnels[0].public_url -replace "tcp://", ""
-          $hostName = $address.Split(':')[0]
-          $port = $address.Split(':')[1]
-          
-          Write-Host "=========================================="
-          Write-Host "HOW TO CONNECT USING noVNC DEMO:"
-          Write-Host "1. Go to: https://novnc.com/noVNC/vnc.html"
-          Write-Host "2. Click 'Settings' (Gear Icon)"
-          Write-Host "3. Change 'Transport' to 'WebSockets' (NOT Encrypted/WSS)"
-          Write-Host "4. Host: $hostName"
-          Write-Host "5. Port: $port"
-          Write-Host "6. Click CONNECT and use password: password"
-          Write-Host "=========================================="
+          # Extract the URL from the log
+          $maxRetries = 20
+          $url = ""
+          $retryCount = 0
+          while ($url -eq "" -and $retryCount -lt $maxRetries) {
+              Start-Sleep -Seconds 5
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile
+                  $line = $content | Select-String -Pattern "https://.*\.trycloudflare\.com"
+                  if ($line) { 
+                      $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value 
+                  }
+              }
+              $retryCount++
+          }
+
+          if ($url -ne "") {
+              # Convert the https:// URL to a WebSocket-friendly address
+              $wsHost = $url -replace "https://", ""
+              
+              Write-Host "=========================================="
+              Write-Host "HOW TO CONNECT:"
+              Write-Host "1. Go to: https://novnc.com/noVNC/vnc.html"
+              Write-Host "2. Click 'Settings' (Gear Icon)"
+              Write-Host "3. Transport: WebSockets"
+              Write-Host "4. Host: $wsHost"
+              Write-Host "5. Port: 443 (Cloudflare uses 443 for https)"
+              Write-Host "6. ENCRYPT: Checked (True)"
+              Write-Host "7. Click CONNECT | Password: password"
+              Write-Host "=========================================="
+          } else {
+              Write-Error "Could not get Cloudflare URL."
+              exit 1
+          }
           
           while($true) { Start-Sleep -Seconds 60 }
