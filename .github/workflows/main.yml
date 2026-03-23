@@ -27,34 +27,31 @@ jobs:
       - name: Install Myrtille (Native Windows Web RDP)
         shell: powershell
         run: |
-          # Force TLS 1.2 and use curl for a stable download
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           $url = "https://github.com/cedrozne/myrtille/releases/download/v2.9.1/Myrtille_2.9.1_x64.msi"
-          
-          Write-Host "Downloading Myrtille via curl..."
+          Write-Host "Downloading Myrtille..."
           curl.exe -L $url -o Myrtille.msi
-          
           if (Test-Path Myrtille.msi) {
-            Write-Host "Installing Myrtille..."
             Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
             Start-Sleep -Seconds 30
           } else {
-            Write-Error "Download failed!"
             exit 1
           }
 
       - name: Setup ngrok & Tunnel Web Port
         shell: powershell
         run: |
-          curl.exe -L https://bin.equinox.io/c/bNyj1mQoe3c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
-          Expand-Archive ngrok.zip -DestinationPath .
-          .\ngrok.exe config add-authtoken $env:NGROK_AUTH_TOKEN
+          # Use Chocolatey to install ngrok - much more reliable
+          choco install ngrok -y
+          
+          # The path for choco-installed ngrok is usually in the PATH, but we'll call it directly
+          ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
           
           # Start ngrok in background
-          Start-Process .\ngrok.exe -ArgumentList "http 80 --log=stdout"
-          Start-Sleep -Seconds 15
+          Start-Process ngrok -ArgumentList "http 80 --log=stdout"
+          Start-Sleep -Seconds 20
           
-          # Fetch and display the URL in the logs
+          # Get the URL from the local API
           $ngrokApi = Invoke-WebRequest -Uri http://localhost:4040/api/tunnels | ConvertFrom-Json
           $url = $ngrokApi.tunnels[0].public_url
           
@@ -64,7 +61,7 @@ jobs:
           Write-Host "LOGIN: runneradmin / P@ssw0rd123!"
           Write-Host "=========================================="
           
-          # KEEP-ALIVE LOOP: Prevents the action from finishing early
+          # Keep-Alive Loop (6 hours)
           $i = 0
           while($i -lt 360) {
             Write-Host "Session active... Minute: $i"
