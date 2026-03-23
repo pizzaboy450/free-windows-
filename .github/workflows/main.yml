@@ -1,0 +1,61 @@
+name: CI
+on: 
+  push:
+  workflow_dispatch:
+  # AUTO-REPEAT: This triggers the session every 6 hours automatically
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+    - name: Enable RDP & Admin
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        # Setting a known password for the runneradmin
+        $Password = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
+        Set-LocalUser -Name "runneradmin" -Password $Password
+    
+    - name: Prepare Guacamole Config
+      run: |
+        if (!(Test-Path guac-config)) { mkdir guac-config }
+        @'
+        <user-mapping>
+            <authorize username="admin" password="admin">
+                <connection name="Windows RDP">
+                    <protocol>rdp</protocol>
+                    <param name="hostname">host.docker.internal</param>
+                    <param name="port">3389</param>
+                    <param name="ignore-cert">true</param>
+                    <param name="security">any</param>
+                </connection>
+            </authorize>
+        </user-mapping>
+        '@ | Out-File -FilePath guac-config\user-mapping.xml -Encoding utf8
+
+    - name: Start Guacamole via Docker
+      run: |
+        docker run --name guacd -d -p 4822:4822 guacamole/guacd
+        # Note: Added -e GUACAMOLE_HOME to ensure it finds your config file
+        docker run --name guac-client -d -p 8080:8080 `
+          -v ${PWD}\guac-config:/etc/guacamole `
+          -e GUACAMOLE_HOME=/etc/guacamole `
+          guacamole/guacamole
+
+    - name: Setup ngrok & Tunnel Port 8080
+      run: |
+        # Download ngrok directly (fixed URL for Windows)
+        Invoke-WebRequest https://bin.equinox.io -OutFile ngrok.zip
+        Expand-Archive ngrok.zip -DestinationPath .
+        
+        # USE HARDCODED TOKEN HERE
+        .\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+        
+        Write-Host "Starting Tunnel to Guacamole (Port 8080)..."
+        .\ngrok.exe http 8080 --log=stdout
+      env:
+        # PASTE YOUR ACTUAL NGROK TOKEN BETWEEN THE QUOTES BELOW
+        NGROK_AUTH_TOKEN: "37l1QIrQAcIgObkcpyBFAHvdjWr_3wVjmVQ9EQTRyj3V8pUxV"
