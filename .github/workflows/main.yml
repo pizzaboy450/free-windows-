@@ -27,26 +27,49 @@ jobs:
       - name: Install Myrtille (Native Windows Web RDP)
         shell: powershell
         run: |
-          # Download Myrtille Installer
+          # Force TLS 1.2 and use curl for a stable download
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           $url = "https://github.com/cedrozne/myrtille/releases/download/v2.9.1/Myrtille_2.9.1_x64.msi"
-          Invoke-WebRequest -Uri $url -OutFile Myrtille.msi
           
-          # Quiet install
-          Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
+          Write-Host "Downloading Myrtille via curl..."
+          curl.exe -L $url -o Myrtille.msi
           
-          # Give services a moment to start
-          Start-Sleep -Seconds 15
+          if (Test-Path Myrtille.msi) {
+            Write-Host "Installing Myrtille..."
+            Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
+            Start-Sleep -Seconds 30
+          } else {
+            Write-Error "Download failed!"
+            exit 1
+          }
 
       - name: Setup ngrok & Tunnel Web Port
         shell: powershell
         run: |
-          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQoe3c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          curl.exe -L https://bin.equinox.io/c/bNyj1mQoe3c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
           Expand-Archive ngrok.zip -DestinationPath .
-          
           .\ngrok.exe config add-authtoken $env:NGROK_AUTH_TOKEN
           
-          Write-Host "Starting Web Tunnel... Open the ngrok URL in your browser."
-          # Myrtille usually runs on port 80 (HTTP) or 443 (HTTPS)
-          .\ngrok.exe http 80
+          # Start ngrok in background
+          Start-Process .\ngrok.exe -ArgumentList "http 80 --log=stdout"
+          Start-Sleep -Seconds 15
+          
+          # Fetch and display the URL in the logs
+          $ngrokApi = Invoke-WebRequest -Uri http://localhost:4040/api/tunnels | ConvertFrom-Json
+          $url = $ngrokApi.tunnels[0].public_url
+          
+          Write-Host "=========================================="
+          Write-Host "ACCESS YOUR WINDOWS WEB RDP AT:"
+          Write-Host "$url/myrtille"
+          Write-Host "LOGIN: runneradmin / P@ssw0rd123!"
+          Write-Host "=========================================="
+          
+          # KEEP-ALIVE LOOP: Prevents the action from finishing early
+          $i = 0
+          while($i -lt 360) {
+            Write-Host "Session active... Minute: $i"
+            Start-Sleep -Seconds 60
+            $i++
+          }
         env:
           NGROK_AUTH_TOKEN: "37l1QIrQAcIgObkcpyBFAHvdjWr_3wVjmVQ9EQTRyj3V8pUxV"
