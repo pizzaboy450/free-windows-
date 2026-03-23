@@ -1,21 +1,52 @@
-- name: Setup ngrok & Tunnel Web Port
+name: Windows Web RDP Session
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Install IIS and Windows Features
         shell: powershell
         run: |
-          # Install ngrok
+          Install-WindowsFeature -name Web-Server, Web-Mgmt-Tools, Web-Default-Doc, Web-Dir-Browsing, Web-Http-Errors, Web-Static-Content, Web-Http-Logging, Web-Stat-Compression, Web-Filtering, Web-ISAPI-Filter, Web-ISAPI-Ext, Web-Net-Ext45, Web-Asp-Net45
+
+      - name: Enable RDP & Set Admin Password
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $Password
+
+      - name: Install Myrtille (Native Windows Web RDP)
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $url = "https://github.com/cedrozne/myrtille/releases/download/v2.9.1/Myrtille_2.9.1_x64.msi"
+          curl.exe -L $url -o Myrtille.msi
+          if (Test-Path Myrtille.msi) {
+            Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
+            Start-Sleep -Seconds 30
+          } else {
+            exit 1
+          }
+
+      - name: Setup ngrok & Tunnel Web Port
+        shell: powershell
+        run: |
           choco install ngrok -y
-          
-          # Authenticate
           ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
-          
-          # Start ngrok in background
-          Write-Host "Starting ngrok tunnel..."
           Start-Process ngrok -ArgumentList "http 80 --log=stdout"
           
-          # RETRY LOOP: Wait for the ngrok API to become available
-          $maxRetries = 10
+          $maxRetries = 12
           $retryCount = 0
           $url = ""
-          
           while ($url -eq "" -and $retryCount -lt $maxRetries) {
               try {
                   Start-Sleep -Seconds 5
@@ -33,12 +64,8 @@
               Write-Host "$url/myrtille"
               Write-Host "LOGIN: runneradmin / P@ssw0rd123!"
               Write-Host "=========================================="
-          } else {
-              Write-Error "Failed to get ngrok URL after $maxRetries attempts."
-              exit 1
           }
           
-          # Keep-Alive Loop (6 hours)
           $i = 0
           while($i -lt 360) {
             Start-Sleep -Seconds 60
