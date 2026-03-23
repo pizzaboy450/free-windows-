@@ -1,4 +1,4 @@
-name: Windows noVNC UltraVNC Fix
+name: Windows noVNC Standalone Fix
 
 on:
   push:
@@ -9,27 +9,30 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install UltraVNC (The Loopback-Friendly Server)
+      - name: Install UltraVNC & Setup Config
         shell: powershell
         run: |
           # 1. Install UltraVNC
           choco install ultravnc -y
           
-          # 2. Create the UltraVNC config file to allow loopback and set password
-          # This avoids the registry headache entirely
-          $configPath = "C:\Program Files\uvnc bvba\UltraVNC\ultravnc.ini"
+          # 2. Create the config file in the install directory
+          # Using 'password' (hex: 4cf1762c5e53) and enabling loopback
+          $vncDir = "C:\Program Files\uvnc bvba\UltraVNC"
           $configContent = @"
           [Permissions]
           [Admin]
           AllowLoopback=1
           LoopbackOnly=0
-          Password=4cf1762c5e53 # This is 'password' in UltraVNC hex
+          Password=4cf1762c5e53
           [UltraVNC]
+          port=5900
           "@
-          Set-Content -Path $configPath -Value $configContent
+          Set-Content -Path "$vncDir\ultravnc.ini" -Value $configContent
           
-          # 3. Start the service
-          net start uvnc_service
+          # 3. Start winvnc.exe as a background process (NOT a service)
+          Write-Host "Starting UltraVNC as standalone process..."
+          Start-Process "$vncDir\winvnc.exe" -ArgumentList "-run" -WindowStyle Hidden
+          Start-Sleep -Seconds 5
 
       - name: Setup Python & noVNC Bridge
         shell: powershell
@@ -48,6 +51,10 @@ jobs:
           # Start Bridge: Web(8080) -> UltraVNC(5900)
           Start-Process python -ArgumentList "-m websockify 8080 127.0.0.1:5900 --web $vncPath" -WindowStyle Hidden
           Start-Sleep -Seconds 15
+          
+          # Quick health check
+          $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 8080
+          if (!$check.TcpTestSucceeded) { Write-Error "Bridge failed to start"; exit 1 }
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
