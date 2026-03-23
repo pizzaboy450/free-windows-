@@ -1,84 +1,66 @@
-name: Windows Web RDP via Cloudflare
+name: Windows noVNC via Cloudflare
 
 on:
   push:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Enable Windows Audio & RDP
+      - name: Install VNC Server and noVNC
         shell: powershell
         run: |
-          Start-Service -Name Audiosrv -ErrorAction SilentlyContinue
-          Set-Service -Name Audiosrv -StartupType Automatic
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "fDisableAudioCapture" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
-          Set-LocalUser -Name "runneradmin" -Password $Password
+          # 1. Install TightVNC (The 'Engine')
+          choco install tightvnc -y
+          
+          # 2. Set VNC Password (Required)
+          $pass = "P@ssw0rd123!"
+          # TightVNC uses a specific registry key for the password
+          # We'll set the password to 'password' for simplicity in this script
+          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
+          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
 
-      - name: Install IIS and ASP.NET
+      - name: Setup WebSocks Bridge (noVNC)
         shell: powershell
         run: |
-          Install-WindowsFeature -name Web-Server, Web-Mgmt-Tools, Web-Default-Doc, Web-Dir-Browsing, Web-Http-Errors, Web-Static-Content, Web-Http-Logging, Web-Stat-Compression, Web-Filtering, Web-ISAPI-Filter, Web-ISAPI-Ext, Web-Net-Ext45, Web-Asp-Net45
-          dism /online /enable-feature /featurename:IIS-ASPNET45 /all
+          # Download a portable noVNC/websockify environment
+          choco install nodejs -y
+          npm install -g websockify
+          
+          # Start websockify: Listen on 8080, forward to VNC on 5900
+          Start-Process "websockify" -ArgumentList "8080 localhost:5900" -WindowStyle Hidden
 
-      - name: Install Myrtille
-        shell: powershell
-        run: |
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          choco install vlc -y
-          $url = "https://github.com/cedrozne/myrtille/releases/download/v2.9.1/Myrtille_2.9.1_x64.msi"
-          curl.exe -L $url -o Myrtille.msi
-          Start-Process msiexec.exe -ArgumentList "/i Myrtille.msi /quiet /qn /norestart" -Wait
-          Start-Sleep -Seconds 30
-          # Restart IIS to ensure everything is bound
-          iisreset
-
-      - name: Setup TryCloudflare & Tunnel
+      - name: Setup TryCloudflare Tunnel
         shell: powershell
         run: |
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
           Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
+          
           Write-Host "Starting TryCloudflare tunnel..."
           $logFile = "cloudflared_err.log"
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:80" -RedirectStandardError $logFile
+          # Tunnel port 8080 (the noVNC port)
+          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:8080" -RedirectStandardError $logFile
           
           $maxRetries = 20
-          $retryCount = 0
           $url = ""
           while ($url -eq "" -and $retryCount -lt $maxRetries) {
               Start-Sleep -Seconds 5
               if (Test-Path $logFile) {
                   $content = Get-Content $logFile
                   $line = $content | Select-String -Pattern "https://.*\.trycloudflare\.com"
-                  if ($line) {
-                      $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value
-                  }
+                  if ($line) { $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value }
               }
               $retryCount++
-              Write-Host "Waiting for Cloudflare URL... (Attempt $retryCount)"
           }
 
           if ($url -ne "") {
               Write-Host "=========================================="
-              Write-Host "ACCESS YOUR WINDOWS WEB RDP AT:"
-              Write-Host "$url/myrtille/"
-              Write-Host "USER: runneradmin | PASS: P@ssw0rd123!"
+              Write-Host "ACCESS YOUR WINDOWS VNC AT:"
+              Write-Host "$url"
+              Write-Host "VNC PASSWORD: password"
               Write-Host "=========================================="
-          } else {
-              Write-Error "Could not find TryCloudflare URL."
-              exit 1
           }
           
-          $i = 0
-          while($i -lt 360) {
-            Start-Sleep -Seconds 60
-            $i++
-          }
+          while($true) { Start-Sleep -Seconds 60 }
