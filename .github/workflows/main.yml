@@ -1,88 +1,313 @@
-name: Windows TigerVNC Auto-Path Fix
+name: Windows Server Stream (Cloudflare)
 
 on:
-  push:
   workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Session duration in hours'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
 
 jobs:
-  build:
+  stream-windows:
     runs-on: windows-latest
     timeout-minutes: 360
+    
     steps:
-      - name: Install VNC and Python Tools
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize Windows Server
         shell: powershell
         run: |
-          # 1. Install TigerVNC and Python
-          choco install tigervnc python -y
-          refreshenv
-          python -m pip install websockify
-          
-      - name: Locate and Start VNC
+          Write-Host "Configuring Windows Server for streaming..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 0
+
+      - name: Set RDP Password
         shell: powershell
         run: |
-          # 2. Find the VNC executable (it moves depending on version)
-          $vncExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Include "vncserver.exe", "winvnc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          
-          if ($null -eq $vncExe) {
-              Write-Error "Could not find VNC executable in Program Files."
-              exit 1
-          }
-          
-          Write-Host "Found VNC at: $vncExe"
-          
-          # 3. Start TigerVNC as a user process
-          # SecurityTypes=None bypasses the 'Invalid Password' wall
-          Start-Process $vncExe -ArgumentList "-SecurityTypes None -localhost 1" -WindowStyle Hidden
+          $Password = "GH@ctions2024!"
+          net user runneradmin $Password
+          Write-Host "RDP User: runneradmin"
+          Write-Host "RDP Password: $Password"
+
+      - name: Install Chocolatey
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+      - name: Install TightVNC Server
+        shell: powershell
+        run: |
+          choco install tightvnc -y --params="'/server /password:GH@ctions2024!'"
           Start-Sleep -Seconds 10
 
-      - name: Setup WebSocket Proxy
+      - name: Configure TightVNC
         shell: powershell
         run: |
-          # 4. Start bridge: Web(8080) -> VNC(5901 or 5900)
-          # TigerVNC usually starts at 5901 for the first display
-          Start-Process python -ArgumentList "-m websockify 8080 localhost:5901" -WindowStyle Hidden
+          # Set VNC password
+          reg add "HKEY_LOCAL_MACHINE\SOFTWARE\TightVNC\Server" /v Password /t REG_BINARY /d 6BCF2A4B6558 /f
+          reg add "HKEY_LOCAL_MACHINE\SOFTWARE\TightVNC\Server" /v ControlPassword /t REG_BINARY /d 6BCF2A4B6558 /f
+          
+          # Configure VNC to accept connections
+          reg add "HKEY_LOCAL_MACHINE\SOFTWARE\TightVNC\Server" /v AcceptHttpConnections /t REG_DWORD /d 1 /f
+          reg add "HKEY_LOCAL_MACHINE\SOFTWARE\TightVNC\Server" /v RfbPort /t REG_DWORD /d 5900 /f
+          
+          # Restart VNC service
+          Stop-Service -Name TightVNC -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          Start-Service -Name TightVNC
           Start-Sleep -Seconds 5
           
-          # Health Check: Try 5900 if 5901 isn't responding
-          $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 5901
-          if (!$check.TcpTestSucceeded) {
-              Write-Host "Port 5901 closed, trying 5900..."
-              Stop-Process -Name "python" -ErrorAction SilentlyContinue
-              Start-Process python -ArgumentList "-m websockify 8080 localhost:5900" -WindowStyle Hidden
-          }
+          Write-Host "TightVNC configured and running on port 5900"
 
-      - name: Setup TryCloudflare Tunnel
+      - name: Setup noVNC Web Interface
         shell: powershell
         run: |
-          curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
-          Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
+          # Install Python
+          choco install python -y
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
           
-          Write-Host "Starting Tunnel..."
-          $logFile = "cloudflared_err.log"
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
+          # Create working directory
+          New-Item -ItemType Directory -Path "C:\novnc" -Force
+          Set-Location C:\novnc
           
-          $maxRetries = 20
-          $url = ""
-          while ($url -eq "" -and $retryCount -lt $maxRetries) {
-              Start-Sleep -Seconds 5
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile
-                  $line = $content | Select-String -Pattern "https://.*\.trycloudflare\.com"
-                  if ($line) { $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value }
-              }
-              $retryCount++
+          # Download noVNC
+          git clone https://github.com/novnc/noVNC.git
+          Set-Location noVNC
+          
+          # Download websockify
+          git clone https://github.com/novnc/websockify.git
+          
+          Write-Host "noVNC setup completed"
+
+      - name: Start noVNC Server
+        shell: powershell
+        run: |
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          # Create and start noVNC server
+          Start-Process python -ArgumentList "C:\novnc\noVNC\websockify\websockify.py --web C:\novnc\noVNC 6080 localhost:5900" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+          
+          Write-Host "noVNC server started on port 6080"
+
+      - name: Download Cloudflared
+        shell: powershell
+        run: |
+          Write-Host "Downloading cloudflared..."
+          $cloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $cloudflaredUrl -OutFile "C:\cloudflared.exe"
+          Write-Host "Cloudflared downloaded successfully"
+
+      - name: Start Cloudflare Tunnel for noVNC
+        shell: powershell
+        run: |
+          Write-Host "Starting Cloudflare Tunnel for noVNC web interface..."
+          
+          # Start cloudflared tunnel
+          Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080 --no-autoupdate" -RedirectStandardOutput "C:\cloudflared_novnc.log" -RedirectStandardError "C:\cloudflared_novnc_error.log" -WindowStyle Hidden
+          
+          Write-Host "Waiting for tunnel to establish..."
+          Start-Sleep -Seconds 15
+          
+          # Read the log file to get the URL
+          $logContent = Get-Content "C:\cloudflared_novnc.log" -Raw
+          
+          if ($logContent -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+            $tunnelUrl = $matches[0]
+            
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "🖥️  WINDOWS SERVER STREAM READY!"
+            Write-Host "=========================================="
+            Write-Host ""
+            Write-Host "🌐 Web Interface: $tunnelUrl"
+            Write-Host "👤 VNC Password: GH@ctions2024!"
+            Write-Host ""
+            Write-Host "📝 Instructions:"
+            Write-Host "   1. Open the URL above in your browser"
+            Write-Host "   2. Click 'Connect'"
+            Write-Host "   3. Enter password when prompted: GH@ctions2024!"
+            Write-Host ""
+            Write-Host "⏱️  Session will run for ${{ github.event.inputs.duration }} hour(s)"
+            Write-Host "=========================================="
+            Write-Host ""
+          } else {
+            Write-Host "⚠️ Could not extract tunnel URL from logs"
+            Write-Host "Log content:"
+            Write-Host $logContent
           }
 
-          if ($url -ne "") {
-              $wsHost = $url -replace "https://", ""
-              Write-Host "=========================================="
-              Write-Host "CONNECT VIA noVNC DEMO:"
-              Write-Host "1. Go to: https://novnc.com/noVNC/vnc.html"
-              Write-Host "2. Settings -> Transport: WebSockets"
-              Write-Host "3. Host: $wsHost"
-              Write-Host "4. Port: 443 | Encrypt: Checked"
-              Write-Host "5. Password: [NONE/BLANK]"
-              Write-Host "=========================================="
+      - name: Start Cloudflare Tunnel for RDP
+        shell: powershell
+        run: |
+          Write-Host "Starting Cloudflare Tunnel for RDP access..."
+          
+          # Start second cloudflared tunnel for RDP
+          Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389 --no-autoupdate" -RedirectStandardOutput "C:\cloudflared_rdp.log" -RedirectStandardError "C:\cloudflared_rdp_error.log" -WindowStyle Hidden
+          
+          Start-Sleep -Seconds 15
+          
+          # Read the log file to get the RDP URL
+          $rdpLogContent = Get-Content "C:\cloudflared_rdp.log" -Raw
+          
+          if ($rdpLogContent -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+            $rdpTunnelUrl = $matches[0]
+            
+            Write-Host ""
+            Write-Host "🖥️  Direct RDP Access Available!"
+            Write-Host "   Tunnel URL: $rdpTunnelUrl"
+            Write-Host "   Username: runneradmin"
+            Write-Host "   Password: GH@ctions2024!"
+            Write-Host ""
+            Write-Host "   Note: Use cloudflared client to connect:"
+            Write-Host "   cloudflared access tcp --hostname $rdpTunnelUrl --url localhost:13389"
+            Write-Host "   Then connect RDP to localhost:13389"
+            Write-Host ""
+          } else {
+            Write-Host "⚠️ Could not extract RDP tunnel URL from logs"
+          }
+
+      - name: Display Connection Information
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "📊 SYSTEM INFORMATION"
+          Write-Host "=========================================="
+          Write-Host ""
+          
+          # Get Windows version
+          $osInfo = Get-CimInstance Win32_OperatingSystem
+          Write-Host "OS: $($osInfo.Caption)"
+          Write-Host "Version: $($osInfo.Version)"
+          Write-Host "Architecture: $($osInfo.OSArchitecture)"
+          
+          # Get CPU info
+          $cpuInfo = Get-CimInstance Win32_Processor
+          Write-Host "CPU: $($cpuInfo.Name)"
+          Write-Host "Cores: $($cpuInfo.NumberOfCores)"
+          
+          # Get memory info
+          $memInfo = Get-CimInstance Win32_ComputerSystem
+          $totalRam = [math]::Round($memInfo.TotalPhysicalMemory / 1GB, 2)
+          Write-Host "RAM: $totalRam GB"
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "🔌 ACTIVE SERVICES"
+          Write-Host "=========================================="
+          
+          # Check VNC service
+          $vncService = Get-Service -Name TightVNC -ErrorAction SilentlyContinue
+          if ($vncService) {
+            Write-Host "✓ TightVNC: $($vncService.Status)"
           }
           
-          while($true) { Start-Sleep -Seconds 60 }
+          # Check if noVNC is running
+          $novncProcess = Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*websockify*" }
+          if ($novncProcess) {
+            Write-Host "✓ noVNC: Running (PID: $($novncProcess.Id))"
+          }
+          
+          # Check cloudflared processes
+          $cloudflaredProcesses = Get-Process -Name cloudflared -ErrorAction SilentlyContinue
+          if ($cloudflaredProcesses) {
+            Write-Host "✓ Cloudflare Tunnels: $($cloudflaredProcesses.Count) active"
+          }
+          
+          Write-Host ""
+
+      - name: Monitor and Keep Session Alive
+        shell: powershell
+        run: |
+          $duration = [int]"${{ github.event.inputs.duration }}"
+          $endTime = (Get-Date).AddHours($duration)
+          
+          Write-Host "=========================================="
+          Write-Host "⏰ SESSION MONITORING"
+          Write-Host "=========================================="
+          Write-Host "Start Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host "End Time: $($endTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+          Write-Host "Duration: $duration hour(s)"
+          Write-Host ""
+          
+          $checkInterval = 300  # 5 minutes
+          $lastUrlDisplay = (Get-Date).AddMinutes(-10)
+          
+          while ((Get-Date) -lt $endTime) {
+            $remaining = $endTime - (Get-Date)
+            Write-Host "⏱️  Time remaining: $($remaining.ToString('hh\:mm\:ss')) | $(Get-Date -Format 'HH:mm:ss')"
+            
+            # Re-display URLs every 30 minutes
+            if (((Get-Date) - $lastUrlDisplay).TotalMinutes -ge 30) {
+              Write-Host ""
+              Write-Host "📌 Connection URLs (refreshed):"
+              
+              # Re-read noVNC log
+              $novncLog = Get-Content "C:\cloudflared_novnc.log" -Raw -ErrorAction SilentlyContinue
+              if ($novncLog -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                Write-Host "   noVNC: $($matches[0])"
+              }
+              
+              # Re-read RDP log
+              $rdpLog = Get-Content "C:\cloudflared_rdp.log" -Raw -ErrorAction SilentlyContinue
+              if ($rdpLog -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                Write-Host "   RDP: $($matches[0])"
+              }
+              
+              Write-Host ""
+              $lastUrlDisplay = Get-Date
+            }
+            
+            # Health check
+            $cloudflaredCount = (Get-Process -Name cloudflared -ErrorAction SilentlyContinue).Count
+            $pythonCount = (Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*websockify*" }).Count
+            
+            if ($cloudflaredCount -lt 2) {
+              Write-Host "⚠️  Warning: Some Cloudflare tunnels may have stopped!"
+            }
+            
+            if ($pythonCount -eq 0) {
+              Write-Host "⚠️  Warning: noVNC server may have stopped!"
+            }
+            
+            Start-Sleep -Seconds $checkInterval
+          }
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "⏹️  SESSION ENDED"
+          Write-Host "=========================================="
+          Write-Host "Session duration completed. Shutting down..."
+
+      - name: Cleanup
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "🧹 Cleaning up session..."
+          
+          # Stop cloudflared processes
+          Get-Process -Name cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
+          
+          # Stop python/noVNC processes
+          Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*websockify*" } | Stop-Process -Force
+          
+          # Stop VNC service
+          Stop-Service -Name TightVNC -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✓ Cleanup completed"
+          Write-Host "Thank you for using Windows Server Stream!"
