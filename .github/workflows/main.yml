@@ -1,4 +1,4 @@
-name: Windows noVNC User-Mode Fix
+name: Direct RDP (No Browser Errors)
 
 on:
   push:
@@ -9,75 +9,46 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install TightVNC & Python
+      - name: Enable Windows RDP & User
         shell: powershell
         run: |
-          choco install tightvnc python -y
-          refreshenv
-          python -m pip install websockify
+          # 1. Enable RDP and Firewall
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # 2. Set Password for 'runneradmin'
+          $Password = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $Password
+          
+          # 3. Enable Audio Redirection
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "fDisableAudioCapture" -Value 0
 
-      - name: Start TightVNC in User Mode
+      - name: Start ngrok TCP Tunnel
         shell: powershell
         run: |
-          # Kill any existing service that might be blocking the port
-          Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
+          # Install and Authenticate ngrok
+          choco install ngrok -y
+          # USE YOUR TOKEN:
+          ngrok config add-authtoken "3BMSLAeag3NtqgcVomW5yxeLFSm_5KhWqGvnpUoumm5MWwu1L"
           
-          # Start TightVNC as a simple background process
-          # -run: starts the server
-          # -repasswd: we set the password to 'password'
-          # -sharefull: ensures the whole desktop is shared
-          $vncExe = "C:\Program Files\TightVNC\tvnserver.exe"
-          
-          # Set the password in the user configuration
-          & $vncExe -controlservice -setpassword "password"
-          
-          Write-Host "Starting VNC Server in User Mode..."
-          Start-Process $vncExe -ArgumentList "-run" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
-
-      - name: Setup noVNC Bridge
-        shell: powershell
-        run: |
-          # Download noVNC
-          mkdir C:\noVNC
-          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
-          Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
-          
-          $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
-          Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
-          
-          # Start Bridge: Web(8080) -> VNC(5900)
-          # We use 127.0.0.1 which User-Mode TightVNC accepts by default
-          Start-Process python -ArgumentList "-m websockify 8080 127.0.0.1:5900 --web $vncPath" -WindowStyle Hidden
+          # Start a RAW TCP tunnel (No HTTP/URL logic involved)
+          Start-Process ngrok -ArgumentList "tcp 3389"
           Start-Sleep -Seconds 10
-
-      - name: Setup TryCloudflare Tunnel
-        shell: powershell
-        run: |
-          curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
-          Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          $logFile = "cloudflared_err.log"
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
+          # Get the TCP Address from ngrok API
+          $ngrokApi = Invoke-WebRequest -Uri http://localhost:4040/api/tunnels -UseBasicParsing | ConvertFrom-Json
+          $address = $ngrokApi.tunnels[0].public_url -replace "tcp://", ""
           
-          $maxRetries = 20
-          $url = ""
-          $retry = 0
-          while ($url -eq "" -and $retry -lt $maxRetries) {
-              Start-Sleep -Seconds 5
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile
-                  $line = $content | Select-String -Pattern "https://.*\.trycloudflare\.com"
-                  if ($line) { $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value }
-              }
-              $retry++
+          Write-Host "=========================================="
+          Write-Host "CONNECT USING WINDOWS REMOTE DESKTOP APP:"
+          Write-Host "COMPUTER ADDRESS: $address"
+          Write-Host "USERNAME: runneradmin"
+          Write-Host "PASSWORD: P@ssw0rd123!"
+          Write-Host "=========================================="
+          
+          # 6-Hour Keep-Alive
+          $i = 0
+          while($i -lt 360) {
+            Start-Sleep -Seconds 60
+            $i++
           }
-
-          if ($url -ne "") {
-              Write-Host "=========================================="
-              Write-Host "VNC ACCESS LINK:"
-              Write-Host "$url/index.html?autoconnect=true&password=password"
-              Write-Host "=========================================="
-          }
-          
-          while($true) { Start-Sleep -Seconds 60 }
