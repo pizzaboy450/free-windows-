@@ -1,0 +1,90 @@
+name: CI
+
+on: [push, workflow_dispatch]
+
+jobs:
+
+  build:
+
+    runs-on: windows-latest
+
+    timeout-minutes: 360
+
+    steps:
+
+    - name: Enable RDP & Admin
+
+      run: |
+
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
+
+   
+
+    - name: Prepare Guacamole Config
+
+      run: |
+
+        mkdir guac-config
+
+        # Create user-mapping for a simple login (user: admin / pass: admin)
+
+        @'
+
+        <user-mapping>
+
+            <authorize username="admin" password="admin">
+
+                <connection name="Windows RDP">
+
+                    <protocol>rdp</protocol>
+
+                    <param name="hostname">host.docker.internal</param>
+
+                    <param name="port">3389</param>
+
+                    <param name="ignore-cert">true</param>
+
+                </connection>
+
+            </authorize>
+
+        </user-mapping>
+
+        '@ | Out-File -FilePath guac-config\user-mapping.xml -Encoding utf8
+
+    - name: Start Guacamole via Docker
+
+      run: |
+
+        docker run --name guacd -d -p 4822:4822 guacamole/guacd
+
+        docker run --name guac-client -d -p 8080:8080 `
+
+          --link guacd:guacd `
+
+          -v ${PWD}\guac-config:/etc/guacamole `
+
+          guacamole/guacamole
+
+    - name: Setup ngrok & Tunnel Port 8080
+
+      run: |
+
+        Invoke-WebRequest https://bin.equinox.io -OutFile ngrok.zip
+
+        Expand-Archive ngrok.zip
+
+        .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+
+        # Tunnel the Guacamole Web UI (Port 8080)
+
+        .\ngrok\ngrok.exe http 8080 --log=stdout
+
+      env:
+
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+
