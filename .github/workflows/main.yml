@@ -1,4 +1,4 @@
-name: Windows noVNC via Cloudflare
+name: Windows noVNC Fixed
 
 on:
   push:
@@ -9,28 +9,46 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install VNC Server and noVNC
+      - name: Install VNC and noVNC
         shell: powershell
         run: |
-          # 1. Install TightVNC (The 'Engine')
+          # 1. Install TightVNC
           choco install tightvnc -y
           
-          # 2. Set VNC Password (Required)
-          $pass = "P@ssw0rd123!"
-          # TightVNC uses a specific registry key for the password
-          # We'll set the password to 'password' for simplicity in this script
+          # 2. Set VNC Password to 'password'
+          # Using the hex-encoded version of 'password' to force it into registry
+          $passHex = "70,61,73,73,77,6f,72,64,00,00,00,00"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
           & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
-
-      - name: Setup WebSocks Bridge (noVNC)
-        shell: powershell
-        run: |
-          # Download a portable noVNC/websockify environment
+          
+          # 3. Download noVNC (Portable Version)
+          mkdir C:\noVNC
+          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
+          Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
+          
+          # 4. Install Node.js and Websockify (The Proxy)
           choco install nodejs -y
           npm install -g websockify
+
+      - name: Start noVNC Service
+        shell: powershell
+        run: |
+          # Start Websockify: Port 8080 (Web) -> Port 5900 (VNC)
+          # We point the webroot to the extracted noVNC folder
+          $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
+          Start-Process "websockify" -ArgumentList "8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
           
-          # Start websockify: Listen on 8080, forward to VNC on 5900
-          Start-Process "websockify" -ArgumentList "8080 localhost:5900" -WindowStyle Hidden
+          # Wait for it to wake up
+          Start-Sleep -Seconds 10
+          
+          # Test if the port is open locally (Prevention of 502)
+          $check = Test-NetConnection -ComputerName localhost -Port 8080
+          if ($check.TcpTestSucceeded) {
+              Write-Host "Local noVNC server is UP on port 8080."
+          } else {
+              Write-Error "Local noVNC server failed to start."
+              exit 1
+          }
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
@@ -40,10 +58,10 @@ jobs:
           
           Write-Host "Starting TryCloudflare tunnel..."
           $logFile = "cloudflared_err.log"
-          # Tunnel port 8080 (the noVNC port)
           Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:8080" -RedirectStandardError $logFile
           
           $maxRetries = 20
+          $retryCount = 0
           $url = ""
           while ($url -eq "" -and $retryCount -lt $maxRetries) {
               Start-Sleep -Seconds 5
@@ -53,13 +71,13 @@ jobs:
                   if ($line) { $url = [regex]::Match($line, "https://.*\.trycloudflare\.com").Value }
               }
               $retryCount++
+              Write-Host "Waiting for Cloudflare URL... (Attempt $retryCount)"
           }
 
           if ($url -ne "") {
               Write-Host "=========================================="
               Write-Host "ACCESS YOUR WINDOWS VNC AT:"
-              Write-Host "$url"
-              Write-Host "VNC PASSWORD: password"
+              Write-Host "$url/vnc.html?autoconnect=true&password=password"
               Write-Host "=========================================="
           }
           
