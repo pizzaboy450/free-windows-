@@ -1,4 +1,4 @@
-name: Windows noVNC Fixed Loopback
+name: Windows noVNC UltraVNC Fix
 
 on:
   push:
@@ -9,61 +9,55 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install VNC with Registry Force-Fix
+      - name: Install UltraVNC (The Loopback-Friendly Server)
         shell: powershell
         run: |
-          # 1. Install TightVNC
-          choco install tightvnc -y
+          # 1. Install UltraVNC
+          choco install ultravnc -y
           
-          # 2. FORCE Loopback & Password in Registry before starting
-          # This stops the 'Loopback connections not enabled' error permanently
-          $regPath = "HKLM:\Software\TightVNC\Server"
-          if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
+          # 2. Create the UltraVNC config file to allow loopback and set password
+          # This avoids the registry headache entirely
+          $configPath = "C:\Program Files\uvnc bvba\UltraVNC\ultravnc.ini"
+          $configContent = @"
+          [Permissions]
+          [Admin]
+          AllowLoopback=1
+          LoopbackOnly=0
+          Password=4cf1762c5e53 # This is 'password' in UltraVNC hex
+          [UltraVNC]
+          "@
+          Set-Content -Path $configPath -Value $configContent
           
-          # Allow 127.0.0.1 connections
-          Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
-          Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 0 -Type DWord
-          Set-ItemProperty -Path $regPath -Name "AcceptHttpConnections" -Value 1 -Type DWord
-          
-          # 3. Set Password and Start Service
-          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
-          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
+          # 3. Start the service
+          net start uvnc_service
 
       - name: Setup Python & noVNC Bridge
         shell: powershell
         run: |
-          # 1. Install Python & Websockify
           choco install python -y
           refreshenv
           python -m pip install websockify
           
-          # 2. Download noVNC
           mkdir C:\noVNC
           Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
           Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
           
-          # 3. Prepare Web Interface
           $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
           Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
           
-          # 4. Start Bridge: Web(8080) -> VNC(5900)
-          # We use 127.0.0.1 explicitly to match the AllowLoopback rule
+          # Start Bridge: Web(8080) -> UltraVNC(5900)
           Start-Process python -ArgumentList "-m websockify 8080 127.0.0.1:5900 --web $vncPath" -WindowStyle Hidden
-          Start-Sleep -Seconds 20
+          Start-Sleep -Seconds 15
 
       - name: Setup TryCloudflare Tunnel
         shell: powershell
         run: |
-          # Install Cloudflared
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
           Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          # Start Tunnel
-          Write-Host "Starting Tunnel..."
           $logFile = "cloudflared_err.log"
           Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
-          # Wait and extract URL
           $maxRetries = 20
           $url = ""
           $retry = 0
