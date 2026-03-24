@@ -1,6 +1,6 @@
 name: Windows Server Stream
 on: 
-  workflow_dispatch: # Allows manual trigger from the Actions tab
+  workflow_dispatch:
 
 jobs:
   stream:
@@ -9,20 +9,20 @@ jobs:
       - name: Download Splashtop Streamer
         shell: powershell
         run: |
-          # Download the official Splashtop Streamer installer
-          Invoke-WebRequest -Uri "https://download.splashtop.com" -OutFile "streamer.exe"
+          # Adding a User-Agent header bypasses the 403 Forbidden error
+          $url = "https://download.splashtop.com"
+          $userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+          Invoke-WebRequest -Uri $url -UserAgent $userAgent -OutFile "streamer.exe"
 
       - name: Install and Configure Splashtop
         shell: cmd
         run: |
-          :: Use your 12-digit deployment code for silent installation
-          :: Replace YOUR_DEPLOYMENT_CODE with your actual code from Splashtop console
+          :: Replace YOUR_DEPLOYMENT_CODE with your 12-digit code
           streamer.exe preid=YOUR_DEPLOYMENT_CODE /s /i noshortcut=1
 
       - name: Keep Runner Alive
         shell: powershell
         run: |
-          Write-Host "Splashtop is running. You can now connect via the Splashtop website or app."
-          Write-Host "The session will stay active for up to 6 hours or until the job is cancelled."
-          # Loop to prevent the action from completing immediately
+          Write-Host "Splashtop is ready. Connect via the Splashtop app/portal."
           while($true) { Start-Sleep -Seconds 60 }
+
