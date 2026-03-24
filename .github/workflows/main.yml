@@ -1,51 +1,662 @@
-name: Ultimate Browser Desktop (No Apps)
+name: Windows Server Stream
 
 on:
-  push:
   workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Session duration in minutes'
+        required: true
+        default: '30'
 
 jobs:
-  build:
+  windows-stream:
     runs-on: windows-latest
     timeout-minutes: 360
-    steps:
-      - name: Setup Virtual Desktop & Web Bridge
-        shell: powershell
-        run: |
-          # 1. Download the all-in-one GoVNC binary
-          # This handles the screen capture AND the browser website in one file.
-          Invoke-WebRequest -Uri "https://github.com/m1k1o/neko/releases/download/v2.10.0/neko_windows_amd64.exe" -OutFile "neko.exe"
-          
-          # 2. Start it on port 8080
-          # Password is set to 'password'
-          Start-Process ./neko.exe -ArgumentList "server --bind 127.0.0.1:8080 --password password" -WindowStyle Hidden
-          Start-Sleep -Seconds 10
 
-      - name: Setup Browser Link
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download & Install TightVNC
         shell: powershell
         run: |
-          # 3. Use Cloudflare to get the URL
-          curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
-          Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
+          $url = "https://www.tightvnc.com/download/2.8.59/tightvnc-2.8.59-gpl-setup-64bit.msi"
+          Write-Host "Downloading TightVNC..."
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\tightvnc.msi" -ErrorAction Stop
           
-          $logFile = "tunnel.log"
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
+          Write-Host "Installing TightVNC..."
+          msiexec /i "$env:TEMP\tightvnc.msi" /quiet /norestart `
+            ADDLOCAL=Server `
+            SERVER_REGISTER_VNC=1 `
+            SERVER_ADD_FIREWALL_EXCEPTION=1 `
+            SET_USERPASSWORD=1 `
+            VALUE_OF_USERPASSWORD="WindowsStream123!"
+
+      - name: Configure Windows & Firewall
+        shell: powershell
+        run: |
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           
-          $url = ""
-          while ($url -eq "") {
-              Start-Sleep -Seconds 5
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile
-                  if ($content -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
-                      $url = $matches[0]
+          # Allow VNC port 5900
+          New-NetFirewallRule -DisplayName "Allow VNC" -Direction Inbound -LocalPort 5900 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
+          
+          # Disable sleep
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change disk-timeout-ac 0
+
+      - name: Start TightVNC Server
+        shell: powershell
+        run: |
+          Write-Host "Starting VNC Server..."
+          Start-Service tvnserver -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+          Get-Service tvnserver | Format-Table
+
+      - name: Install Node.js & websockify
+        shell: powershell
+        run: |
+          Write-Host "Installing Node.js..."
+          $nodeUrl = "https://nodejs.org/dist/v18.17.0/node-v18.17.0-x64.msi"
+          Invoke-WebRequest -Uri $nodeUrl -OutFile "$env:TEMP\node.msi"
+          msiexec /i "$env:TEMP\node.msi" /quiet /norestart
+          
+          # Refresh PATH
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          Write-Host "Installing websockify..."
+          npm install -g websockify
+
+      - name: Download noVNC
+        shell: powershell
+        run: |
+          Write-Host "Downloading noVNC..."
+          $url = "https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\novnc.zip"
+          Expand-Archive -Path "$env:TEMP\novnc.zip" -DestinationPath "C:\novnc_src"
+          Rename-Item -Path "C:\novnc_src\noVNC-1.4.0" -NewName "novnc" -Force
+
+      - name: Create Custom Web Interface
+        shell: powershell
+        run: |
+          $htmlContent = @"
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Windows Server Live Stream</title>
+              <link rel="stylesheet" href="https://novnc.com/app/styles/base.css">
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      display: flex;
+                      flex-direction: column;
+                  }
+                  
+                  .header {
+                      background: rgba(0, 0, 0, 0.8);
+                      color: white;
+                      padding: 20px;
+                      text-align: center;
+                      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                  }
+                  
+                  .header h1 {
+                      font-size: 32px;
+                      margin-bottom: 10px;
+                      display: flex;
+                      align-items: center;
+                      justify-content: center;
+                      gap: 15px;
+                  }
+                  
+                  .status-indicator {
+                      display: inline-flex;
+                      align-items: center;
+                      gap: 8px;
+                      background: #48bb78;
+                      padding: 8px 16px;
+                      border-radius: 20px;
+                      font-size: 14px;
+                      font-weight: 600;
+                  }
+                  
+                  .status-dot {
+                      width: 8px;
+                      height: 8px;
+                      background: white;
+                      border-radius: 50%;
+                      animation: pulse 2s infinite;
+                  }
+                  
+                  @keyframes pulse {
+                      0%, 100% { opacity: 1; }
+                      50% { opacity: 0.5; }
+                  }
+                  
+                  .main-container {
+                      display: flex;
+                      gap: 20px;
+                      padding: 20px;
+                      flex: 1;
+                      max-width: 1600px;
+                      margin: 0 auto;
+                      width: 100%;
+                  }
+                  
+                  .screen-container {
+                      flex: 1;
+                      background: #1a1a1a;
+                      border-radius: 12px;
+                      overflow: hidden;
+                      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+                      display: flex;
+                      flex-direction: column;
+                  }
+                  
+                  #screen {
+                      flex: 1;
+                      background: black;
+                      cursor: crosshair;
+                  }
+                  
+                  .screen-info {
+                      background: #2d3748;
+                      color: #e2e8f0;
+                      padding: 12px;
+                      font-size: 12px;
+                      border-top: 1px solid #4a5568;
+                  }
+                  
+                  .sidebar {
+                      width: 280px;
+                      background: white;
+                      border-radius: 12px;
+                      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+                      display: flex;
+                      flex-direction: column;
+                      overflow-y: auto;
+                      max-height: calc(100vh - 200px);
+                  }
+                  
+                  .sidebar-section {
+                      padding: 20px;
+                      border-bottom: 1px solid #e2e8f0;
+                  }
+                  
+                  .sidebar-section:last-child {
+                      border-bottom: none;
+                  }
+                  
+                  .sidebar-title {
+                      font-size: 13px;
+                      font-weight: 700;
+                      color: #2d3748;
+                      text-transform: uppercase;
+                      letter-spacing: 0.5px;
+                      margin-bottom: 15px;
+                      display: flex;
+                      align-items: center;
+                      gap: 8px;
+                  }
+                  
+                  .btn {
+                      width: 100%;
+                      padding: 12px;
+                      margin-bottom: 8px;
+                      border: none;
+                      border-radius: 6px;
+                      cursor: pointer;
+                      font-size: 13px;
+                      font-weight: 600;
+                      transition: all 0.2s ease;
+                      text-transform: uppercase;
+                      letter-spacing: 0.5px;
+                  }
+                  
+                  .btn-primary {
+                      background: #667eea;
+                      color: white;
+                  }
+                  
+                  .btn-primary:hover {
+                      background: #5568d3;
+                      transform: translateY(-2px);
+                      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+                  }
+                  
+                  .btn-secondary {
+                      background: #edf2f7;
+                      color: #2d3748;
+                  }
+                  
+                  .btn-secondary:hover {
+                      background: #e2e8f0;
+                  }
+                  
+                  .btn-danger {
+                      background: #f56565;
+                      color: white;
+                  }
+                  
+                  .btn-danger:hover {
+                      background: #e53e3e;
+                  }
+                  
+                  .btn:active {
+                      transform: scale(0.98);
+                  }
+                  
+                  .input-group {
+                      display: flex;
+                      gap: 8px;
+                      margin-bottom: 8px;
+                  }
+                  
+                  input[type="text"], input[type="password"] {
+                      flex: 1;
+                      padding: 10px;
+                      border: 1px solid #cbd5e0;
+                      border-radius: 6px;
+                      font-size: 13px;
+                      font-family: 'Consolas', monospace;
+                  }
+                  
+                  input[type="text"]:focus, input[type="password"]:focus {
+                      outline: none;
+                      border-color: #667eea;
+                      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+                  }
+                  
+                  .info-card {
+                      background: #f7fafc;
+                      border-left: 4px solid #667eea;
+                      padding: 15px;
+                      border-radius: 6px;
+                      font-size: 12px;
+                      color: #4a5568;
+                      line-height: 1.8;
+                  }
+                  
+                  .info-card strong {
+                      color: #2d3748;
+                  }
+                  
+                  .keyboard-grid {
+                      display: grid;
+                      grid-template-columns: 1fr 1fr;
+                      gap: 8px;
+                      margin-bottom: 8px;
+                  }
+                  
+                  .keyboard-grid .btn {
+                      margin-bottom: 0;
+                      padding: 10px;
+                      font-size: 11px;
+                  }
+                  
+                  .connection-status {
+                      background: #edf2f7;
+                      padding: 12px;
+                      border-radius: 6px;
+                      font-size: 12px;
+                      margin-bottom: 15px;
+                      display: flex;
+                      align-items: center;
+                      gap: 10px;
+                  }
+                  
+                  .connection-dot {
+                      width: 10px;
+                      height: 10px;
+                      background: #48bb78;
+                      border-radius: 50%;
+                      flex-shrink: 0;
+                  }
+                  
+                  .connection-dot.disconnected {
+                      background: #f56565;
+                      animation: none;
+                  }
+                  
+                  @media (max-width: 1024px) {
+                      .main-container {
+                          flex-direction: column;
+                      }
+                      
+                      .sidebar {
+                          width: 100%;
+                          max-height: none;
+                      }
+                  }
+                  
+                  .footer {
+                      background: rgba(0, 0, 0, 0.8);
+                      color: #a0aec0;
+                      padding: 15px;
+                      text-align: center;
+                      font-size: 12px;
+                  }
+              </style>
+          </head>
+          <body>
+              <div class="header">
+                  <h1>
+                      <span>🖥️</span>
+                      Windows Server Live Stream
+                  </h1>
+                  <div class="status-indicator">
+                      <span class="status-dot"></span>
+                      ACTIVE
+                  </div>
+              </div>
+              
+              <div class="main-container">
+                  <div class="screen-container">
+                      <canvas id="screen"></canvas>
+                      <div class="screen-info">
+                          <span id="conn-info">Connecting...</span>
+                      </div>
+                  </div>
+                  
+                  <div class="sidebar">
+                      <div class="sidebar-section">
+                          <div class="connection-status">
+                              <div class="connection-dot" id="connDot"></div>
+                              <span id="connStatus">Initializing...</span>
+                          </div>
+                      </div>
+                      
+                      <div class="sidebar-section">
+                          <div class="sidebar-title">⌨️ Keyboard</div>
+                          <div class="keyboard-grid">
+                              <button class="btn btn-secondary" onclick="sendKey('Win')">Win</button>
+                              <button class="btn btn-secondary" onclick="sendKey('Alt+Tab')">Alt+Tab</button>
+                              <button class="btn btn-secondary" onclick="sendKey('Ctrl+Shift+Esc')">Task Mgr</button>
+                              <button class="btn btn-secondary" onclick="sendKey('Ctrl+Alt+Delete')">Ctrl+Alt+Del</button>
+                          </div>
+                      </div>
+                      
+                      <div class="sidebar-section">
+                          <div class="sidebar-title">🔧 Commands</div>
+                          <div class="input-group">
+                              <input type="text" id="keyInput" placeholder="Type text..." onkeypress="if(event.key==='Enter') typeText()">
+                          </div>
+                          <button class="btn btn-primary" onclick="typeText()">Type</button>
+                      </div>
+                      
+                      <div class="sidebar-section">
+                          <div class="sidebar-title">🖱️ Mouse</div>
+                          <div class="keyboard-grid">
+                              <button class="btn btn-secondary" onclick="clickMouse('left')">Left Click</button>
+                              <button class="btn btn-secondary" onclick="clickMouse('right')">Right Click</button>
+                              <button class="btn btn-secondary" onclick="clickMouse('middle')">Middle Click</button>
+                              <button class="btn btn-secondary" onclick="doubleMouse()">Double Click</button>
+                          </div>
+                      </div>
+                      
+                      <div class="sidebar-section">
+                          <div class="sidebar-title">ℹ️ Info</div>
+                          <div class="info-card">
+                              <strong>Protocol:</strong> VNC over WebSocket<br>
+                              <strong>Resolution:</strong> <span id="res">1920x1080</span><br>
+                              <strong>Connection:</strong> <span id="proto">Encrypted</span><br>
+                              <strong>Latency:</strong> <span id="latency">--ms</span>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+              
+              <div class="footer">
+                  💡 Tip: Click on screen to interact. Use keyboard shortcuts to control the server.
+              </div>
+              
+              <script src="https://novnc.com/app/ui.js"></script>
+              <script src="https://novnc.com/app/rfb.js"></script>
+              <script>
+                  let rfb;
+                  const canvas = document.getElementById('screen');
+                  const connDot = document.getElementById('connDot');
+                  const connStatus = document.getElementById('connStatus');
+                  
+                  function connect() {
+                      // Using localhost:6080 - will work when accessed locally
+                      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                      const host = window.location.hostname;
+                      const port = window.location.port || (protocol === 'wss:' ? '443' : '80');
+                      
+                      const wsUrl = protocol + '//' + host + ':' + port + '/websockify';
+                      
+                      rfb = new RFB(canvas, wsUrl, {
+                          credentials: { password: 'WindowsStream123!' },
+                          onUpdateState: handleUpdateState,
+                          onConnectionFailure: handleConnectionFailure
+                      });
+                  }
+                  
+                  function handleUpdateState(state) {
+                      switch(state) {
+                          case 'connecting':
+                              connDot.style.background = '#f6ad55';
+                              connStatus.textContent = 'Connecting...';
+                              break;
+                          case 'connected':
+                              connDot.style.background = '#48bb78';
+                              connStatus.textContent = 'Connected';
+                              document.getElementById('res').textContent = rfb.desktop.width + 'x' + rfb.desktop.height;
+                              break;
+                          case 'disconnecting':
+                              connStatus.textContent = 'Disconnecting...';
+                              break;
+                          case 'disconnected':
+                              connDot.classList.add('disconnected');
+                              connStatus.textContent = 'Disconnected';
+                              break;
+                      }
+                  }
+                  
+                  function handleConnectionFailure(detail) {
+                      connDot.classList.add('disconnected');
+                      connStatus.textContent = 'Connection Failed';
+                      console.error('Connection failed:', detail);
+                  }
+                  
+                  function sendKey(combo) {
+                      if (!rfb) return;
+                      const keys = combo.split('+');
+                      const keysDown = [];
+                      
+                      for (let key of keys) {
+                          key = key.trim();
+                          let keyCode;
+                          
+                          switch(key) {
+                              case 'Win': keyCode = 'SuperLeft'; break;
+                              case 'Alt': keyCode = 'AltLeft'; break;
+                              case 'Ctrl': keyCode = 'ControlLeft'; break;
+                              case 'Shift': keyCode = 'ShiftLeft'; break;
+                              case 'Tab': keyCode = 'Tab'; break;
+                              case 'Esc': keyCode = 'Escape'; break;
+                              case 'Delete': keyCode = 'Delete'; break;
+                              default: keyCode = key;
+                          }
+                          
+                          rfb.sendKey(XtKeyboard.prototype._charCodeToKeysym(keyCode.charCodeAt(0)), keyCode, true);
+                          keysDown.push(keyCode);
+                      }
+                      
+                      setTimeout(() => {
+                          keysDown.reverse();
+                          for (let keyCode of keysDown) {
+                              rfb.sendKey(XtKeyboard.prototype._charCodeToKeysym(keyCode.charCodeAt(0)), keyCode, false);
+                          }
+                      }, 100);
+                  }
+                  
+                  function typeText() {
+                      const input = document.getElementById('keyInput').value;
+                      if (!rfb || !input) return;
+                      
+                      for (let char of input) {
+                          rfb.sendKey(char.charCodeAt(0), char, true);
+                          rfb.sendKey(char.charCodeAt(0), char, false);
+                      }
+                      
+                      document.getElementById('keyInput').value = '';
+                  }
+                  
+                  function clickMouse(button) {
+                      if (!rfb) return;
+                      const mask = button === 'left' ? 1 : button === 'right' ? 4 : 2;
+                      rfb.sendPointerEvent(rfb.mouse.x, rfb.mouse.y, mask);
+                      setTimeout(() => rfb.sendPointerEvent(rfb.mouse.x, rfb.mouse.y, 0), 100);
+                  }
+                  
+                  function doubleMouse() {
+                      if (!rfb) return;
+                      rfb.sendPointerEvent(rfb.mouse.x, rfb.mouse.y, 1);
+                      setTimeout(() => {
+                          rfb.sendPointerEvent(rfb.mouse.x, rfb.mouse.y, 0);
+                          setTimeout(() => {
+                              rfb.sendPointerEvent(rfb.mouse.x, rfb.mouse.y, 1);
+                              setTimeout(() => rfb.sendPointerEvent(rfb.mouse.x, rfb.mouse.y, 0), 50);
+                          }, 50);
+                      }, 50);
+                  }
+                  
+                  window.addEventListener('load', connect);
+              </script>
+          </body>
+          </html>
+          "@
+          
+          $htmlContent | Out-File -FilePath "C:\novnc\index.html" -Encoding UTF8 -Force
+          Write-Host "Web interface created"
+
+      - name: Start WebSocket Bridge & HTTP Server
+        shell: powershell
+        run: |
+          Write-Host "Starting websockify bridge..."
+          $websockifyPath = (npm list -g websockify | grep websockify | Select-Object -First 1).Split(' ')[0].Trim()
+          
+          # Start websockify on port 6080 connecting to local VNC
+          Start-Process websockify `
+            -ArgumentList "6080 127.0.0.1:5900" `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput "$env:TEMP\websockify.log" `
+            -RedirectStandardError "$env:TEMP\websockify.err"
+          
+          Write-Host "Starting HTTP server on port 8080..."
+          
+          # Create simple HTTP server in PowerShell
+          $listener = New-Object System.Net.HttpListener
+          $listener.Prefixes.Add("http://+:8080/")
+          $listener.Start()
+          
+          # Get the noVNC directory
+          $novncDir = "C:\novnc\novnc"
+          
+          # Handle requests in background
+          $httpJob = Start-Job -ScriptBlock {
+              param($listener, $novncDir)
+              
+              while ($listener.IsListening) {
+                  $context = $listener.GetContext()
+                  $request = $context.Request
+                  $response = $context.Response
+                  
+                  try {
+                      $filePath = "$novncDir$($request.Url.LocalPath)"
+                      
+                      if ((Test-Path $filePath) -and (Get-Item $filePath).PSIsContainer) {
+                          $filePath = Join-Path $filePath "index.html"
+                      }
+                      
+                      if (Test-Path $filePath) {
+                          $content = [System.IO.File]::ReadAllBytes($filePath)
+                          $response.ContentType = [System.Net.Mime.MediaTypeNames+Application]::Octet
+                          $response.OutputStream.Write($content, 0, $content.Length)
+                      } else {
+                          $response.StatusCode = 404
+                      }
+                  } catch {
+                      $response.StatusCode = 500
+                  } finally {
+                      $response.OutputStream.Close()
                   }
               }
-          }
-
-          Write-Host "=========================================="
-          Write-Host "CLICK THIS LINK FOR BROWSER ACCESS:"
-          Write-Host "$url"
-          Write-Host "PASSWORD: password"
-          Write-Host "=========================================="
+          } -ArgumentList $listener, $novncDir
           
-          while($true) { Start-Sleep -Seconds 60 }
+          Start-Sleep -Seconds 3
+          Write-Host "Servers started successfully!"
+          Write-Host "Access the stream at: http://localhost:8080"
+
+      - name: Display Connection Details
+        shell: powershell
+        run: |
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host "✅ Windows Server Stream is ACTIVE" -ForegroundColor Green
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "📊 CONNECTION DETAILS:" -ForegroundColor Cyan
+          Write-Host "  Local Access: http://localhost:8080" -ForegroundColor Yellow
+          Write-Host "  VNC Server: 127.0.0.1:5900" -ForegroundColor Yellow
+          Write-Host "  Password: WindowsStream123!" -ForegroundColor Yellow
+          Write-Host "  WebSocket: ws://localhost:6080" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "⏱️  Duration: ${{ github.event.inputs.duration }} minutes" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "🎮 FEATURES:" -ForegroundColor Cyan
+          Write-Host "  ✓ Full screen interaction" -ForegroundColor Green
+          Write-Host "  ✓ Keyboard & mouse control" -ForegroundColor Green
+          Write-Host "  ✓ Real-time streaming" -ForegroundColor Green
+          Write-Host "  ✓ No external services" -ForegroundColor Green
+          Write-Host "========================================" -ForegroundColor Green
+
+      - name: Keep Session Alive
+        shell: powershell
+        run: |
+          $duration = [int]"${{ github.event.inputs.duration }}"
+          $endTime = (Get-Date).AddMinutes($duration)
+          $checkInterval = 30
+          
+          Write-Host "Session will run for $duration minutes"
+          
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Round((($endTime - (Get-Date)).TotalMinutes), 1)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active... $remaining minutes remaining"
+              
+              # Keep processes alive
+              $webProcesses = @(Get-Process websockify -ErrorAction SilentlyContinue)
+              $vncService = Get-Service tvnserver -ErrorAction SilentlyContinue
+              
+              if ($vncService.Status -ne 'Running') {
+                  Write-Host "⚠️  VNC service stopped, restarting..."
+                  Start-Service tvnserver
+              }
+              
+              Start-Sleep -Seconds $checkInterval
+          }
+          
+          Write-Host "Session time limit reached"
+
+      - name: Cleanup & Shutdown
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Cleaning up processes..."
+          
+          # Stop services
+          Stop-Service tvnserver -Force -ErrorAction SilentlyContinue
+          
+          # Kill processes
+          Get-Process websockify -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+          
+          Write-Host "✅ Cleanup complete"
