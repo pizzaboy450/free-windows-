@@ -1,4 +1,4 @@
-name: Windows Server Stream
+name: RustDesk No-Login Stream
 on: 
   workflow_dispatch:
 
@@ -6,23 +6,27 @@ jobs:
   stream:
     runs-on: windows-latest
     steps:
-      - name: Download Splashtop Streamer
+      - name: Download and Setup RustDesk
         shell: powershell
         run: |
-          # Adding a User-Agent header bypasses the 403 Forbidden error
-          $url = "https://download.splashtop.com"
-          $userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-          Invoke-WebRequest -Uri $url -UserAgent $userAgent -OutFile "streamer.exe"
-
-      - name: Install and Configure Splashtop
-        shell: cmd
-        run: |
-          :: Replace YOUR_DEPLOYMENT_CODE with your 12-digit code
-          streamer.exe preid=YOUR_DEPLOYMENT_CODE /s /i noshortcut=1
+          # Download RustDesk
+          $url = "https://github.com"
+          Invoke-WebRequest -Uri $url -OutFile "rustdesk.exe"
+          
+          # Start RustDesk and set a password (change 'Password123' if desired)
+          Start-Process .\rustdesk.exe --install
+          Start-Sleep -Seconds 10
+          .\rustdesk.exe --set-password Password123
+          
+          # Get the ID from the RustDesk config to display in logs
+          Write-Host "------------------------------------------------"
+          Write-Host "YOUR CONNECTION ID WILL APPEAR BELOW (May take a moment)"
+          $id = .\rustdesk.exe --get-id
+          Write-Host "ID: $id"
+          Write-Host "PASSWORD: Password123"
+          Write-Host "------------------------------------------------"
 
       - name: Keep Runner Alive
         shell: powershell
         run: |
-          Write-Host "Splashtop is ready. Connect via the Splashtop app/portal."
           while($true) { Start-Sleep -Seconds 60 }
-
