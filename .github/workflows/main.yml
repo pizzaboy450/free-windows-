@@ -1,18 +1,61 @@
-- name: Download & Install RustDesk
+name: Full Windows VM Browser Stream
+on: workflow_dispatch
+
+jobs:
+  stream:
+    runs-on: windows-latest
+    steps:
+      - name: Install RustDesk via Chocolatey
         shell: powershell
         run: |
-          # Use curl for a faster, more reliable download
-          # Updated to the latest stable 1.3.7 64-bit link
-          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.3.7/rustdesk-1.3.7-x86_64.exe"
+          Write-Host "Installing RustDesk... This takes about 1-2 minutes."
+          # choco is the most stable way to avoid "stuck" downloads
+          choco install rustdesk -y --no-progress
           
-          Write-Host "Starting download..."
-          curl.exe -L -o "rustdesk.exe" "$url"
+          # Give the service a moment to initialize after install
+          Start-Sleep -Seconds 20
+
+      - name: Configure & Get Credentials
+        shell: powershell
+        run: |
+          # Define the standard install path
+          $rd_path = "C:\Program Files\RustDesk\rustdesk.exe"
           
-          if (Test-Path "rustdesk.exe") {
-              Write-Host "Download successful. Installing..."
-              Start-Process .\rustdesk.exe -ArgumentList "--silent-install" -Wait
-              Start-Sleep -Seconds 15
-          } else {
-              Write-Error "Download failed! File not found."
+          if (!(Test-Path $rd_path)) {
+              Write-Error "RustDesk was not found at $rd_path"
               exit 1
+          }
+
+          Write-Host "Setting password..."
+          # Set a static password for the web login
+          Start-Process $rd_path -ArgumentList "--password Password123" -Wait
+          Start-Sleep -Seconds 5
+          
+          Write-Host "Retrieving ID..."
+          # Loop to wait for the network to assign an ID
+          $id = ""
+          for ($i=0; $i -lt 10; $i++) {
+              $id = & $rd_path --get-id
+              if ($id -match '\d+') { break }
+              Write-Host "Waiting for ID... ($($i+1)/10)"
+              Start-Sleep -Seconds 5
+          }
+          
+          Write-Host "------------------------------------------------"
+          Write-Host "CONNECT VIA BROWSER: https://web.rustdesk.com"
+          Write-Host "YOUR ID: $id"
+          Write-Host "PASSWORD: Password123"
+          Write-Host "------------------------------------------------"
+
+      - name: Keep Runner Alive
+        shell: powershell
+        run: |
+          Write-Host "Runner is active. Access the VM now."
+          Write-Host "Note: This job will auto-terminate in 6 hours."
+          # Loop with output to prevent GitHub from killing an 'idle' runner
+          $timeout = New-TimeSpan -Hours 6
+          $sw = [diagnostics.stopwatch]::StartNew()
+          while ($sw.Elapsed -lt $timeout) {
+              Write-Host "Keep-alive heartbeat: $(Get-Date)"
+              Start-Sleep -Seconds 60
           }
