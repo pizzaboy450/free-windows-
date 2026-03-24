@@ -1,4 +1,4 @@
-name: Browser-Only Desktop Final
+name: MeshCentral Browser Desktop
 
 on:
   push:
@@ -9,59 +9,39 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Install VNC & Fix Loopback
+      - name: Launch MeshCentral Agent
         shell: powershell
         run: |
-          # 1. Install TightVNC
-          choco install tightvnc -y
+          # 1. Download the MeshCentral Assistant (The 'Agent')
+          # This acts exactly like the Chrome Remote Desktop 'host'
+          Invoke-WebRequest -Uri "https://meshcentral.com/downloads/MeshAssistant-x64.exe" -OutFile "MeshAssistant.exe"
           
-          # 2. THE KILLER: Force the Registry to allow the web-bridge
-          $regPath = "HKLM:\Software\TightVNC\Server"
-          if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
-          Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
-          Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 0 -Type DWord
+          # 2. Start it silently
+          Start-Process ./MeshAssistant.exe -ArgumentList "-silent" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
           
-          # 3. Set Password and Start
-          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -setpassword "password"
-          & "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -start
-
-      - name: Launch Web Bridge
+      - name: Setup Cloudflare Tunnel
         shell: powershell
         run: |
-          # 4. Use Python (already on the runner) to create the Web-to-VNC link
-          python -m pip install websockify
-          
-          mkdir C:\noVNC
-          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "C:\novnc.zip"
-          Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\noVNC"
-          
-          $vncPath = Get-ChildItem -Path "C:\noVNC\noVNC-*" | Select-Object -ExpandProperty FullName
-          Copy-Item "$vncPath\vnc.html" "$vncPath\index.html"
-          
-          # Start bridge: Port 8080 (Web) -> Port 5900 (VNC)
-          Start-Process python -ArgumentList "-m websockify 8080 localhost:5900 --web $vncPath" -WindowStyle Hidden
-
-      - name: Setup Web URL
-        shell: powershell
-        run: |
-          # 5. Use Cloudflare to give you the browser link
+          # 3. Get Cloudflare
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
           Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          $logFile = "tunnel.log"
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
+          # 4. Tunnel the local Mesh interface
+          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:80" -RedirectStandardError tunnel.log
           
+          # 5. Extract the Link
           $url = ""
           while ($url -eq "") {
               Start-Sleep -Seconds 5
-              if (Test-Path $logFile) {
-                  $url = (Get-Content $logFile | Select-String -Pattern "https://.*\.trycloudflare\.com").Matches.Value
+              if (Test-Path tunnel.log) {
+                  $url = (Get-Content tunnel.log | Select-String -Pattern "https://.*\.trycloudflare\.com").Matches.Value
               }
           }
 
           Write-Host "=========================================="
           Write-Host "CLICK THIS LINK FOR BROWSER ACCESS:"
-          Write-Host "$url/index.html?autoconnect=true&password=password"
+          Write-Host "$url"
           Write-Host "=========================================="
           
           while($true) { Start-Sleep -Seconds 60 }
