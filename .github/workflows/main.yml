@@ -1,4 +1,4 @@
-name: MeshCentral Browser Desktop
+name: Ultimate Browser Desktop (No Apps)
 
 on:
   push:
@@ -9,39 +9,43 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - name: Launch MeshCentral Agent
+      - name: Setup Virtual Desktop & Web Bridge
         shell: powershell
         run: |
-          # 1. Download the MeshCentral Assistant (The 'Agent')
-          # This acts exactly like the Chrome Remote Desktop 'host'
-          Invoke-WebRequest -Uri "https://meshcentral.com/downloads/MeshAssistant-x64.exe" -OutFile "MeshAssistant.exe"
+          # 1. Download the all-in-one GoVNC binary
+          # This handles the screen capture AND the browser website in one file.
+          Invoke-WebRequest -Uri "https://github.com/m1k1o/neko/releases/download/v2.10.0/neko_windows_amd64.exe" -OutFile "neko.exe"
           
-          # 2. Start it silently
-          Start-Process ./MeshAssistant.exe -ArgumentList "-silent" -WindowStyle Hidden
+          # 2. Start it on port 8080
+          # Password is set to 'password'
+          Start-Process ./neko.exe -ArgumentList "server --bind 127.0.0.1:8080 --password password" -WindowStyle Hidden
           Start-Sleep -Seconds 10
-          
-      - name: Setup Cloudflare Tunnel
+
+      - name: Setup Browser Link
         shell: powershell
         run: |
-          # 3. Get Cloudflare
+          # 3. Use Cloudflare to get the URL
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi -o cloudflared.msi
           Start-Process msiexec.exe -ArgumentList "/i cloudflared.msi /quiet /qn" -Wait
           
-          # 4. Tunnel the local Mesh interface
-          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:80" -RedirectStandardError tunnel.log
+          $logFile = "tunnel.log"
+          Start-Process "C:\Program Files (x86)\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError $logFile
           
-          # 5. Extract the Link
           $url = ""
           while ($url -eq "") {
               Start-Sleep -Seconds 5
-              if (Test-Path tunnel.log) {
-                  $url = (Get-Content tunnel.log | Select-String -Pattern "https://.*\.trycloudflare\.com").Matches.Value
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile
+                  if ($content -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+                      $url = $matches[0]
+                  }
               }
           }
 
           Write-Host "=========================================="
           Write-Host "CLICK THIS LINK FOR BROWSER ACCESS:"
           Write-Host "$url"
+          Write-Host "PASSWORD: password"
           Write-Host "=========================================="
           
           while($true) { Start-Sleep -Seconds 60 }
