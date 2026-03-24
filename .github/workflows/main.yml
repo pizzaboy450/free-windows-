@@ -1,33 +1,28 @@
-name: Windows Server Stream via Splashtop
-
-on:
-  workflow_dispatch:
+name: Windows Server Stream
+on: 
+  workflow_dispatch: # Allows manual trigger from the Actions tab
 
 jobs:
-  run-windows-splashtop:
+  stream:
     runs-on: windows-latest
-
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Download Splashtop Streamer
+        shell: powershell
+        run: |
+          # Download the official Splashtop Streamer installer
+          Invoke-WebRequest -Uri "https://download.splashtop.com" -OutFile "streamer.exe"
 
-    # Step: Download Splashtop Streamer installer (example, replace with actual URL)
-    - name: Download Splashtop Installer
-      run: |
-        Invoke-WebRequest -Uri "https://www.splashtop.com/download/Streamer" -OutFile "Splashtop_Streamer.exe"
+      - name: Install and Configure Splashtop
+        shell: cmd
+        run: |
+          :: Use your 12-digit deployment code for silent installation
+          :: Replace YOUR_DEPLOYMENT_CODE with your actual code from Splashtop console
+          streamer.exe preid=YOUR_DEPLOYMENT_CODE /s /i noshortcut=1
 
-    # Step: Install Splashtop silently
-    - name: Install Splashtop
-      run: |
-        Start-Process -FilePath "Splashtop_Streamer.exe" -ArgumentList "/silent" -Wait
-
-    # Step: Start Splashtop (replace with actual path if needed)
-    - name: Start Splashtop
-      run: |
-        Start-Process "C:\Program Files (x86)\Splashtop\Splashtop Remote Agent\SRApp.exe"
-
-    # Optional: Keep runner alive (limited)
-    - name: Keep Runner Alive
-      run: |
-        Write-Host "Splashtop started. Runner will wait..."
-        Start-Sleep -Seconds 3600  # wait for 1 hour
+      - name: Keep Runner Alive
+        shell: powershell
+        run: |
+          Write-Host "Splashtop is running. You can now connect via the Splashtop website or app."
+          Write-Host "The session will stay active for up to 6 hours or until the job is cancelled."
+          # Loop to prevent the action from completing immediately
+          while($true) { Start-Sleep -Seconds 60 }
