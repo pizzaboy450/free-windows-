@@ -1,63 +1,194 @@
-name: Full Windows VM Browser Stream
-on: workflow_dispatch
+# ============================================================
+# Windows VM Desktop via Pinggy
+# ============================================================
+# One workflow. Gives you a full Windows desktop in the browser.
+#
+#   1. Starts a real Windows VM (GitHub Actions runner)
+#   2. Installs TightVNC + noVNC (browser-based VNC client)
+#   3. Tunnels it to the internet via Pinggy (one SSH command)
+#   4. Prints a URL — open it, full desktop.
+# ============================================================
+
+name: Windows Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      vnc_password:
+        description: "VNC password (8 chars max)"
+        required: true
+        type: string
+      session_minutes:
+        description: "Session duration (max 360)"
+        required: false
+        default: "120"
+        type: string
+      pinggy_token:
+        description: "Pinggy token (optional, for persistent URL)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
-  stream:
+  desktop:
     runs-on: windows-latest
+    timeout-minutes: 360
+
     steps:
-      - name: Install RustDesk
+      - name: Start Windows Desktop
         shell: powershell
+        env:
+          VNC_PASS: ${{ inputs.vnc_password }}
+          SESSION_MIN: ${{ inputs.session_minutes || '120' }}
+          PINGGY_TOKEN: ${{ inputs.pinggy_token }}
         run: |
-          choco install rustdesk -y --no-progress
-          Start-Sleep -Seconds 15
+          # ── Install TightVNC ───────────────────────────
+          Write-Host "=== Installing VNC ==="
+          choco install tightvnc -y --no-progress `
+            --params "'/SET_PASSWORD:$env:VNC_PASS /SET_CONTROL_PASSWORD:$env:VNC_PASS'"
+          refreshenv
 
-      - name: Force Start & Get ID
-        shell: powershell
-        run: |
-          $rd_path = "C:\Program Files\RustDesk\rustdesk.exe"
-          
-          # 1. Ensure the service is running
-          Write-Host "Starting RustDesk Service..."
-          Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
-          
-          # 2. Set the password
-          & $rd_path --password Password123
-          Start-Sleep -Seconds 5
+          # Start VNC server
+          Start-Service -Name "tvnserver" -ErrorAction SilentlyContinue
+          Start-Sleep 3
 
-          # 3. Aggressive loop to get the ID (Retries for 2 minutes)
-          Write-Host "Waiting for Network ID..."
-          $id = ""
-          for ($i=1; $i -le 24; $i++) {
-              $id = (& $rd_path --get-id)
-              # Clean the output (remove spaces/newlines)
-              $id = $id.Trim()
-              
-              if ($id -match '^\d+$') { 
-                  Write-Host "SUCCESS: ID Found!"
-                  break 
-              }
-              
-              Write-Host "Attempt $i: ID is still blank. Waiting 5 seconds..."
-              Start-Sleep -Seconds 5
+          # Verify
+          for ($i = 0; $i -lt 10; $i++) {
+            if (Get-NetTCPConnection -LocalPort 5900 -State Listen -EA SilentlyContinue) {
+              Write-Host "VNC running on :5900"
+              break
+            }
+            Start-Sleep 2
           }
 
-          if (-not $id) {
-              Write-Error "Could not retrieve ID. The service might be blocked by a firewall."
-              exit 1
-          }
-          
-          Write-Host "------------------------------------------------"
-          Write-Host "CONNECT VIA BROWSER: https://web.rustdesk.com"
-          Write-Host "YOUR ID: $id"
-          Write-Host "PASSWORD: Password123"
-          Write-Host "------------------------------------------------"
+          # ── Install noVNC + websockify ─────────────────
+          Write-Host "`n=== Installing noVNC ==="
+          pip install websockify numpy --quiet
 
-      - name: Keep Runner Alive
+          # Clone noVNC for the web client
+          git clone --depth 1 https://github.com/novnc/noVNC.git "$env:TEMP\noVNC"
+
+          # Start websockify (serves noVNC web UI + bridges WebSocket to VNC)
+          $wsArgs = "--web", "$env:TEMP\noVNC", "6080", "localhost:5900"
+          $wsProc = Start-Process -FilePath "python" `
+            -ArgumentList ("-m", "websockify" + $wsArgs) `
+            -PassThru -NoNewWindow
+          Start-Sleep 3
+
+          Write-Host "noVNC running on :6080"
+
+          # ── Pinggy tunnel ──────────────────────────────
+          Write-Host "`n=== Starting Pinggy tunnel ==="
+
+          # Build SSH command
+          if ($env:PINGGY_TOKEN -and $env:PINGGY_TOKEN -ne "") {
+            $sshTarget = "$($env:PINGGY_TOKEN)@a.pinggy.io"
+          } else {
+            $sshTarget = "a.pinggy.io"
+          }
+
+          # Pinggy uses SSH — no binary needed
+          # -o StrictHostKeyChecking=no  → skip host key prompt
+          # -R 0:localhost:6080          → tunnel noVNC port
+          $sshProc = Start-Process -FilePath "ssh" `
+            -ArgumentList @(
+              "-p", "443",
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "ServerAliveInterval=30",
+              "-R", "0:localhost:6080",
+              $sshTarget,
+              "x:https"
+            ) `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$env:TEMP\pinggy_out.log" `
+            -RedirectStandardError "$env:TEMP\pinggy_err.log"
+
+          # Wait for Pinggy to assign URL
+          $tunnelUrl = ""
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep 3
+            $log = (Get-Content "$env:TEMP\pinggy_out.log" -Raw -EA SilentlyContinue) + `
+                   (Get-Content "$env:TEMP\pinggy_err.log" -Raw -EA SilentlyContinue)
+
+            $match = [regex]::Match($log, 'https://[a-zA-Z0-9._-]+\.pinggy\.(link|io)[^\s]*')
+            if ($match.Success) {
+              $tunnelUrl = $match.Value
+              break
+            }
+
+            # Also check for generic URLs
+            $match2 = [regex]::Match($log, 'https://[a-zA-Z0-9._-]+\.(a\.free\.)?pinggy\.(link|io)')
+            if ($match2.Success) {
+              $tunnelUrl = $match2.Value
+              break
+            }
+
+            Write-Host "Waiting for Pinggy URL... ($($i+1)/20)"
+          }
+
+          # ── Print connection info ──────────────────────
+          Write-Host ""
+          Write-Host "========================================================"
+          Write-Host ""
+
+          if ($tunnelUrl) {
+            Write-Host "  YOUR WINDOWS DESKTOP IS READY"
+            Write-Host ""
+            Write-Host "  URL: $tunnelUrl/vnc.html"
+            Write-Host ""
+            Write-Host "  1. Open the URL above"
+            Write-Host "  2. Click 'Connect'"
+            Write-Host "  3. Enter your VNC password"
+            Write-Host "  4. Full Windows desktop!"
+          } else {
+            Write-Host "  Could not parse Pinggy URL from logs."
+            Write-Host "  Pinggy output:"
+            Get-Content "$env:TEMP\pinggy_out.log" -EA SilentlyContinue
+            Get-Content "$env:TEMP\pinggy_err.log" -EA SilentlyContinue
+          }
+
+          Write-Host ""
+          Write-Host "========================================================"
+          Write-Host ""
+
+          # ── Keep alive ─────────────────────────────────
+          $endTime = (Get-Date).AddMinutes([int]$env:SESSION_MIN)
+          Write-Host "Session runs until $($endTime.ToString('HH:mm:ss')) ($env:SESSION_MIN min)`n"
+
+          while ((Get-Date) -lt $endTime) {
+            $vnc    = [bool](Get-NetTCPConnection -LocalPort 5900 -State Listen -EA SilentlyContinue)
+            $ws     = [bool](Get-NetTCPConnection -LocalPort 6080 -State Listen -EA SilentlyContinue)
+            $tunnel = [bool](!$sshProc.HasExited)
+            $left   = [math]::Round(($endTime - (Get-Date)).TotalMinutes)
+
+            Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] VNC:$(if($vnc){'OK'}else{'X'}) noVNC:$(if($ws){'OK'}else{'X'}) Pinggy:$(if($tunnel){'OK'}else{'X'}) | ${left}m left"
+
+            # Restart Pinggy if it died
+            if ($sshProc.HasExited) {
+              Write-Host "Restarting Pinggy..."
+              $sshProc = Start-Process -FilePath "ssh" `
+                -ArgumentList @("-p", "443", "-o", "StrictHostKeyChecking=no",
+                  "-o", "ServerAliveInterval=30", "-R", "0:localhost:6080",
+                  $sshTarget, "x:https") `
+                -PassThru -NoNewWindow `
+                -RedirectStandardOutput "$env:TEMP\pinggy_out.log" `
+                -RedirectStandardError "$env:TEMP\pinggy_err.log"
+              Start-Sleep 5
+              $log = (Get-Content "$env:TEMP\pinggy_out.log" -Raw -EA SilentlyContinue) + `
+                     (Get-Content "$env:TEMP\pinggy_err.log" -Raw -EA SilentlyContinue)
+              $m = [regex]::Match($log, 'https://[a-zA-Z0-9._-]+\.pinggy\.(link|io)')
+              if ($m.Success) { Write-Host "New URL: $($m.Value)/vnc.html" }
+            }
+
+            Start-Sleep 30
+          }
+
+          Write-Host "`nSession expired."
+
+      - name: Cleanup
+        if: always()
         shell: powershell
         run: |
-          $timeout = New-TimeSpan -Hours 6
-          $sw = [diagnostics.stopwatch]::StartNew()
-          while ($sw.Elapsed -lt $timeout) {
-              Write-Host "Runner Active - $(Get-Date)"
-              Start-Sleep -Seconds 60
-          }
+          Get-Process -Name "ssh","python","tvnserver" -EA SilentlyContinue | Stop-Process -Force
+          & "C:\Program Files\TightVNC\tvnserver.exe" -stop -silent 2>$null
+          Write-Host "Done."
